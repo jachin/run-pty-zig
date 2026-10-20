@@ -62,7 +62,7 @@ fn detectEnv() Env {
     return Env{ .no_color = false, .supports_emoji = true };
 }
 
-pub const version = "0.1.1";
+pub const version = "0.1.2";
 
 /// Entry point for the tool. `args` is the full argv; `args[0]` is the program
 /// name. `stdin_is_tty` decides between interactive (Phase 6) and
@@ -117,8 +117,8 @@ pub fn run(writer: *Io.Writer, args: []const [:0]const u8, stdin_is_tty: bool) !
     }
 }
 
-test "version is 0.1.1" {
-    try std.testing.expectEqualStrings("0.1.1", version);
+test "version is 0.1.2" {
+    try std.testing.expectEqualStrings("0.1.2", version);
 }
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
