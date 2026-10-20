@@ -1,5 +1,6 @@
 # Reference source (kept locally, not part of this project)
 run-pty/
+ghostty/
 
 # Zig build artifacts
 zig-out/
