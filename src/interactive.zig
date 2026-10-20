@@ -51,12 +51,19 @@ fn optionalize(s: []u8) ?[]u8 {
 
 /// Global signal flag: set by the signal handler, checked in the main loop.
 const signal_received = std.atomic.Value(bool).init(false);
+/// Set by the SIGWINCH handler to trigger a resize check.
+const resize_received = std.atomic.Value(bool).init(false);
 
 extern "c" fn signal(sig: c_int, handler: ?*fn(c_int) callconv(.c) void) c_int;
 
 fn signalHandler(sig: c_int) callconv(.c) void {
     _ = sig;
     @constCast(&signal_received).store(true, .monotonic);
+}
+
+fn resizeHandler(sig: c_int) callconv(.c) void {
+    _ = sig;
+    @constCast(&resize_received).store(true, .monotonic);
 }
 
 /// The interactive session: holds all state for the TUI event loop.
@@ -618,6 +625,15 @@ pub const Session = struct {
             // Check for signals (SIGINT/TERM/HUP).
             if (signal_received.load(.monotonic)) {
                 self.killAll() catch {};
+                // Wait for children to exit.
+                for (self.commands) |*c| {
+                    if (c.pty) |*pty| {
+                        _ = pty.wait();
+                        pty.deinit();
+                        c.pty = null;
+                    }
+                }
+                self.cleanup();
                 return;
             }
 
@@ -635,8 +651,25 @@ pub const Session = struct {
                 }
             }
 
-            const nready = std.posix.poll(self.poll_fds.items, -1) catch break;
-            if (nready == 0) continue;
+            const nready = std.posix.poll(self.poll_fds.items, 100) catch break;
+            if (nready == 0) {
+                // Timeout: check for resize.
+                if (@constCast(&resize_received).swap(false, .monotonic)) {
+                    const nc = @as(u16, @intCast(getTermCols()));
+                    const nr = @as(u16, @intCast(getTermRows()));
+                    if (nc != self.term_cols or nr != self.term_rows) {
+                        self.term_cols = nc;
+                        self.term_rows = nr;
+                        for (self.commands) |*c| {
+                            if (c.pty) |*pty| pty.resize(nc, nr);
+                        }
+                        if (self.current == .dashboard) {
+                            self.switchToDashboard(false) catch {};
+                        }
+                    }
+                }
+                continue;
+            }
 
             for (self.poll_fds.items, 0..) |*pfd, i| {
                 if (pfd.revents == 0) continue;
@@ -708,10 +741,14 @@ pub const Session = struct {
         const command = &self.commands[cmd_idx];
         if (command.pty == null) return;
 
-        const status = command.pty.?.tryWait();
-        if (status == null) return;
-        const exit_code = @as(u32, @intCast(Pty.decodeStatus(status.?)));
-        command.markExited(exit_code);
+        const exit_code = command.pty.?.tryWait() orelse return;
+        // Drain remaining PTY output before closing.
+        const remaining = command.pty.?.drain();
+        if (remaining.len > 0) {
+            _ = command.pushHistory(remaining);
+            self.writeRaw(remaining) catch {};
+        }
+        command.markExited(@as(u32, @intCast(exit_code)));
 
         // Remove from poll.
         for (self.poll_fds.items, 0..) |*pfd, i| {
@@ -779,10 +816,13 @@ pub const Session = struct {
 
         // Install signal handlers.
         @constCast(&signal_received).store(false, .monotonic);
+        @constCast(&resize_received).store(false, .monotonic);
         const handler: *fn(c_int) callconv(.c) void = @constCast(&signalHandler);
         _ = signal(@intFromEnum(std.posix.SIG.INT), handler);
         _ = signal(@intFromEnum(std.posix.SIG.TERM), handler);
         _ = signal(@intFromEnum(std.posix.SIG.HUP), handler);
+        const resize_handler: *fn(c_int) callconv(.c) void = @constCast(&resizeHandler);
+        _ = signal(@intFromEnum(std.posix.SIG.WINCH), resize_handler);
     }
 
     fn restoreTerminal(self: *Session) void {
@@ -812,7 +852,7 @@ pub fn run(allocator: Allocator, descriptions: []const types.CommandDescription,
         var cmd = Command{
             .label = label,
             .file = desc.command[0],
-            .args = desc.command,
+            .args = desc.command[1..],
             .cwd = desc.cwd,
             .kill_all_sequence = desc.kill_all_sequence,
             .title = desc.title,

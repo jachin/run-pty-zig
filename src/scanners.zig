@@ -94,6 +94,12 @@ pub fn splitAlternateScreen(s: []const u8, allocator: std.mem.Allocator) ![]Part
     return parts.toOwnedSlice() catch @panic("oom");
 }
 
+/// Check if `s` contains a terminal query that needs a fake response.
+pub fn isTerminalQuery(s: []const u8) bool {
+    return endsWith(s, "6n") or endsWith(s, "0t") or endsWith(s, "t") or
+        startsWith(s, "\x1B]10;") or startsWith(s, "\x1B]11;") or startsWith(s, "\x1B]4;");
+}
+
 /// Build a fake response to a terminal query so programs don't get stuck when
 /// stdin is not a TTY (non-interactive mode). Mirrors the original's
 /// `respondToRequestFake`.

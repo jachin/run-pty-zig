@@ -97,8 +97,17 @@ pub fn run(allocator: Allocator, descriptions: []const types.CommandDescription,
                 var buf: [4096]u8 = undefined;
                 const n = cmd.pty.?.read(&buf) catch 0;
                 if (n > 0) {
-                    _ = cmd.pushHistory(buf[0..n]);
-                    try writer.writeAll(buf[0..n]);
+                    const data = buf[0..n];
+                    // Respond to terminal queries with fake responses.
+                    if (scanners.isTerminalQuery(data)) {
+                        const response = scanners.respondToRequestFake(allocator, data) catch "";
+                        if (response.len > 0) {
+                            cmd.pty.?.write(response);
+                        }
+                        continue;
+                    }
+                    _ = cmd.pushHistory(data);
+                    try writer.writeAll(data);
                 }
             }
             if (cmd.pty.?.tryWait()) |exit_code| {
@@ -141,6 +150,14 @@ pub fn run(allocator: Allocator, descriptions: []const types.CommandDescription,
 }
 
 fn handleExit(allocator: Allocator, commands: *std.array_list.Managed(Command), cmd: *Command, exit_code: u32, env: Env, writer: *std.Io.Writer) !void {
+    // Drain remaining PTY output before closing.
+    if (cmd.pty) |*pty| {
+        const remaining = pty.drain();
+        if (remaining.len > 0) {
+            _ = cmd.pushHistory(remaining);
+            try writer.writeAll(remaining);
+        }
+    }
     cmd.markExited(exit_code);
     const num_exited = countExited(commands);
     const block = try render.exitTextAndHistory(allocator, &cmd.text(), exit_code, num_exited, commands.items.len, env);

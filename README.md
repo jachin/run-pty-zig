@@ -60,6 +60,7 @@ The JSON format is a top-level array of command objects:
 | Variable | Effect |
 |---|---|
 | `NO_COLOR` | Use plain single-character indicators instead of emoji/ANSI color. |
+| `RUN_PTY_MAX_HISTORY` | Maximum bytes of output history to retain per command (default: 1,000,000). |
 
 ### Keyboard shortcuts (interactive mode)
 

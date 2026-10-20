@@ -304,37 +304,42 @@ pub fn getPid(command: *const Command) ?i32 {
     };
 }
 
-/// The maximum history length, from `RUN_PTY_MAX_HISTORY` or the default.
+/// The maximum history length, from `RUN_PTY_MAX_HISTORY` or the default (1M).
 fn maxHistory() usize {
     const env = std.c.getenv("RUN_PTY_MAX_HISTORY");
     if (env) |ptr| {
         if (ptr[0] != 0) {
             const s = std.mem.sliceTo(ptr, 0);
-            const n = std.fmt.parseInt(usize, s, 10) catch return 100000;
+            const n = std.fmt.parseInt(usize, s, 10) catch return 1000000;
             if (n > 0) return n;
         }
     }
-    return 100000;
+    return 1000000;
 }
 
 /// Append `chunk` to `existing`, capping the result at `max` bytes (keeping
-/// the most recent data). Returns an owned slice.
+/// the most recent data). Frees the old `existing` slice if it was heap-allocated
+/// (i.e. non-empty). Returns an owned slice.
 fn appendCapped(existing: []const u8, chunk: []const u8, max: usize) []const u8 {
     const total = existing.len + chunk.len;
-    if (total <= max) {
-        const out = std.heap.page_allocator.alloc(u8, total) catch return existing;
-        std.mem.copyForwards(u8, out, existing);
-        std.mem.copyForwards(u8, out[existing.len..], chunk);
-        return out;
-    }
-    // Keep the most recent `max` bytes.
-    const out = std.heap.page_allocator.alloc(u8, max) catch return existing;
-    const overflow = total - max;
-    const start = if (overflow < existing.len) overflow else 0;
-    const from_existing = existing.len - start;
-    std.mem.copyForwards(u8, out, existing[start..]);
-    const chunk_start = if (from_existing < max) from_existing else 0;
-    std.mem.copyForwards(u8, out[from_existing..], chunk[chunk_start..]);
+    const out = if (total <= max) blk: {
+        const o = std.heap.page_allocator.alloc(u8, total) catch return existing;
+        std.mem.copyForwards(u8, o, existing);
+        std.mem.copyForwards(u8, o[existing.len..], chunk);
+        break :blk o;
+    } else blk: {
+        const o = std.heap.page_allocator.alloc(u8, max) catch return existing;
+        const overflow = total - max;
+        const start = if (overflow < existing.len) overflow else 0;
+        const from_existing = existing.len - start;
+        std.mem.copyForwards(u8, o, existing[start..]);
+        const chunk_start = if (from_existing < max) from_existing else 0;
+        std.mem.copyForwards(u8, o[from_existing..], chunk[chunk_start..]);
+        break :blk o;
+    };
+    // Free the old slice if it was heap-allocated (non-empty means it was
+    // produced by a previous appendCapped call, not the initial "" literal).
+    if (existing.len > 0) std.heap.page_allocator.free(existing);
     return out;
 }
 

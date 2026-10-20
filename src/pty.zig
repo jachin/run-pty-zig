@@ -117,6 +117,20 @@ pub const Pty = struct {
         return decodeStatus(status);
     }
 
+    /// Read all remaining output from the PTY master (drain the kernel buffer).
+    /// Returns the collected data as an owned slice.
+    pub fn drain(self: *const Pty) []u8 {
+        var out: std.array_list.Managed(u8) = .init(std.heap.page_allocator);
+        defer out.deinit();
+        var buf: [4096]u8 = undefined;
+        while (true) {
+            const n = self.read(&buf) catch break;
+            if (n == 0) break;
+            out.appendSlice(buf[0..n]) catch break;
+        }
+        return out.toOwnedSlice() catch &.{};
+    }
+
     /// Close the master fd.
     pub fn deinit(self: *const Pty) void {
         _ = c.close(self.master);

@@ -293,7 +293,7 @@ pub fn parseArgs(allocator: Allocator, args: []const []const u8) !ParseResult {
             .cwd = ".",
             .command = command,
             .status = &.{},
-            .default_status = undefined,
+            .default_status = null,
             .kill_all_sequence = KILL_SEQUENCE,
         });
     }
