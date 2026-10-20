@@ -8,6 +8,7 @@ const indicators = @import("indicators.zig");
 const pty_mod = @import("pty.zig");
 const labels = @import("labels.zig");
 const args_mod = @import("args.zig");
+const scanners = @import("scanners.zig");
 
 const Command = command_mod.Command;
 const Current = command_mod.Current;
@@ -101,6 +102,7 @@ pub const Session = struct {
     original_termios: std.c.termios,
     term_cols: u16,
     term_rows: u16,
+    pending_query_cmd: ?usize,
 
     pub fn init(allocator: Allocator, commands: []Command, auto_exit: AutoExit, env: Env, writer: *std.Io.Writer) Session {
         return .{
@@ -119,6 +121,7 @@ pub const Session = struct {
             .original_termios = undefined,
             .term_cols = @as(u16, @intCast(getTermCols())),
             .term_rows = @as(u16, @intCast(getTermRows())),
+            .pending_query_cmd = null,
         };
     }
 
@@ -458,7 +461,47 @@ pub const Session = struct {
     // Stdin handling (key dispatcher).
     // -----------------------------------------------------------------------
 
+    /// Check if `data` looks like a terminal query response (e.g. cursor
+    /// position `\x1B[12;40R`, window size `\x1B[48;0t`, OSC response
+    /// `\x1B]11;rgb:...\x07`).
+    fn isQueryResponse(data: []const u8) bool {
+        if (data.len < 4) return false;
+        if (data[0] != 0x1B) return false;
+        if (data[1] == '[') {
+            // CSI response: \x1B[...R or \x1B[...t
+            for (data[2..]) |c| {
+                if (c == 'R' or c == 't') return true;
+                if (c < '0' or c > '9') {
+                    if (c != ';' and c != '?') return false;
+                }
+            }
+            return false;
+        }
+        if (data[1] == ']') {
+            // OSC response: \x1B]...;...\x07 or \x1B]...;...\x1B\\
+            return true;
+        }
+        return false;
+    }
+
+    /// Forward a terminal query from a child to the real terminal (stdout).
+    /// The response will arrive on stdin and be relayed back by onStdin.
+    fn forwardQuery(self: *Session, cmd_idx: usize, query: []const u8) void {
+        self.pending_query_cmd = cmd_idx;
+        self.writeRaw(query) catch {};
+    }
+
     fn onStdin(self: *Session, data: []const u8) !void {
+        // If there's a pending terminal query and this looks like a response,
+        // relay it to the child's PTY instead of treating it as user input.
+        if (self.pending_query_cmd) |cmd_idx| {
+            if (isQueryResponse(data)) {
+                const command = &self.commands[cmd_idx];
+                if (command.pty) |*pty| pty.write(data);
+                self.pending_query_cmd = null;
+                return;
+            }
+        }
         switch (self.current) {
             .command => |cmd| {
                 if (isSgrMouseEvent(data) or std.mem.eql(u8, data, KEY_ESC)) {
@@ -796,6 +839,13 @@ pub const Session = struct {
         const command = &self.commands[cmd_idx];
         const status_changed = command.pushHistory(data);
         command.updateStatusFromRules(data);
+
+        // Forward terminal queries to the real terminal so the child gets
+        // accurate answers (cursor position, fg/bg color, window size).
+        if (scanners.isTerminalQuery(data)) {
+            self.forwardQuery(cmd_idx, data);
+            return;
+        }
 
         switch (self.current) {
             .command => |cmd| {

@@ -10,6 +10,7 @@ const StatusTuple = types.StatusTuple;
 const Pty = pty_mod.Pty;
 const scanners = @import("scanners.zig");
 const ansi = @import("ansi.zig");
+const regex = @import("regex.zig");
 
 /// Convert a `?StatusTuple` to a `?StatusValue` (`[2][]const u8`).
 fn toStatusValue(status: ?StatusTuple) ?StatusValue {
@@ -179,15 +180,17 @@ pub const Command = struct {
         }
     }
 
-    /// Match the command's status rules against new output. A rule whose
-    /// pattern appears in `data` sets `status_from_rules`; a rule with a `null`
-    /// status resets it. (The original splits into lines and matches each; this
-    /// is a conservative substring approximation.)
+    /// Match the command's status rules against new output. Each rule's
+    /// `pattern` is treated as a regular expression (like the original's
+    /// `RegExp(key, "u").test(line)`). A matching rule sets
+    /// `status_from_rules`; a rule with a `null` status resets it.
     pub fn updateStatusFromRules(self: *Command, data: []const u8) void {
         const stripped = ansi.removeGraphicRenditions(std.heap.page_allocator, data) catch return;
         defer std.heap.page_allocator.free(stripped);
         for (self.status_rules) |rule| {
-            if (std.mem.indexOf(u8, stripped, rule.pattern)) |_| {
+            var re = regex.Regex.compile(rule.pattern) catch continue;
+            defer re.deinit();
+            if (re.matches(stripped)) {
                 self.status_from_rules = toStatusValue(rule.status);
             }
         }
