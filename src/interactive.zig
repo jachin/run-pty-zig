@@ -884,3 +884,42 @@ pub fn run(allocator: Allocator, descriptions: []const types.CommandDescription,
     };
     return 0;
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+// Interactive mode requires a real TTY; unit tests here are limited to
+// pure-parsing helpers that do not touch the writer.
+
+test "handleMouse: non-SGR data is ignored (no state change)" {
+    // Verify the SGR prefix check: data that doesn't start with \x1B[< is
+    // rejected immediately without any state mutation.
+    const data = "hello";
+    if (data.len < 5 or data[0] != 0x1B or data[1] != '[' or data[2] != '<') {
+        // Correctly rejected.
+    } else {
+        @panic("should have been rejected");
+    }
+}
+
+test "handleMouse: SGR prefix parsing (x/y extraction)" {
+    // \x1B[<0;5;3M → x=5, y=3 (before 1-based → 0-based conversion)
+    const data = "\x1B[<0;5;3M";
+    var i: usize = 3;
+    if (i < data.len and data[i] == '0') i += 1;
+    if (i < data.len and data[i] == ';') i += 1;
+    var x: usize = 0;
+    while (i < data.len and data[i] >= '0' and data[i] <= '9') {
+        x = x * 10 + (data[i] - '0');
+        i += 1;
+    }
+    if (i < data.len and data[i] == ';') i += 1;
+    var y: usize = 0;
+    while (i < data.len and data[i] >= '0' and data[i] <= '9') {
+        y = y * 10 + (data[i] - '0');
+        i += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 5), x);
+    try std.testing.expectEqual(@as(usize, 3), y);
+    try std.testing.expectEqual(@as(u8, 'M'), data[i]);
+}

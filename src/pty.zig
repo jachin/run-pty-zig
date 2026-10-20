@@ -208,3 +208,47 @@ test "killing a sleeping process yields 128+signal" {
     const exit_code = pty.wait();
     try std.testing.expectEqual(@as(c_int, 128 + @intFromEnum(std.posix.SIG.KILL)), exit_code);
 }
+
+test "spawn with cwd changes working directory" {
+    const pty = try Pty.spawn("pwd", &.{}, "/tmp", 80, 24);
+    defer pty.deinit();
+    var buf: [256]u8 = undefined;
+    var len: usize = 0;
+    while (len < buf.len) {
+        const n = pty.read(buf[len..]) catch break;
+        if (n == 0) break;
+        len += n;
+    }
+    _ = pty.wait();
+    // The output should contain "/tmp" (possibly with a trailing \r\n).
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "/tmp") != null);
+}
+
+test "spawn non-existent executable exits 127" {
+    const pty = try Pty.spawn("definitely_not_a_real_command_xyz", &.{}, null, 80, 24);
+    defer pty.deinit();
+    var buf: [256]u8 = undefined;
+    var r: usize = 1;
+    while (r != 0) {
+        r = pty.read(&buf) catch 0;
+    }
+    const exit_code = pty.wait();
+    try std.testing.expectEqual(@as(c_int, 127), exit_code);
+}
+
+test "resize changes terminal size" {
+    const pty = try Pty.spawn("sh", &.{"-c", "stty size"}, null, 80, 24);
+    defer pty.deinit();
+    pty.resize(120, 40);
+    var buf: [256]u8 = undefined;
+    var len: usize = 0;
+    while (len < buf.len) {
+        const n = pty.read(buf[len..]) catch break;
+        if (n == 0) break;
+        len += n;
+    }
+    _ = pty.wait();
+    // stty size outputs "rows cols" (e.g. "40 120").
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "40") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "120") != null);
+}

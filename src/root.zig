@@ -116,3 +116,33 @@ pub fn run(writer: *Io.Writer, args: []const [:0]const u8, stdin_is_tty: bool) !
         },
     }
 }
+
+test "version is 0.0.1" {
+    try std.testing.expectEqualStrings("0.0.1", version);
+}
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+test "detectEnv: NO_COLOR set" {
+    _ = setenv("NO_COLOR", "1", 1);
+    defer _ = unsetenv("NO_COLOR");
+    const env = detectEnv();
+    try std.testing.expect(env.no_color);
+    try std.testing.expect(!env.supports_emoji);
+}
+
+test "detectEnv: NO_COLOR empty string" {
+    _ = setenv("NO_COLOR", "", 1);
+    defer _ = unsetenv("NO_COLOR");
+    const env = detectEnv();
+    try std.testing.expect(!env.no_color);
+    try std.testing.expect(env.supports_emoji);
+}
+
+test "detectEnv: NO_COLOR unset" {
+    _ = unsetenv("NO_COLOR");
+    const env = detectEnv();
+    try std.testing.expect(!env.no_color);
+    try std.testing.expect(env.supports_emoji);
+}

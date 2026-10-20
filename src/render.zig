@@ -560,7 +560,8 @@ pub fn drawDashboardCommandLines(
         const end_str = try end_buf.toOwnedSlice();
         defer allocator.free(end_str);
 
-        const truncated_end = try ansi.truncate(allocator, end_str, width - start_length - separator.len);
+        const end_width: usize = if (width > start_length + separator.len) width - start_length - separator.len else 0;
+        const truncated_end = try ansi.truncate(allocator, end_str, end_width);
         defer allocator.free(truncated_end);
 
         const length = start_length + separator.len + removeGraphicRenditionsLen(truncated_end);
@@ -1018,4 +1019,103 @@ test "drawDashboard: done state" {
     try std.testing.expect(std.mem.indexOf(u8, text, "cmd one") != null);
     // Done state: no footer.
     try std.testing.expect(std.mem.indexOf(u8, text, "focus command") == null);
+}
+
+test "drawDashboard: color env uses ANSI codes" {
+    const allocator = std.testing.allocator;
+    var c1 = Command.forTest(command_mod.runningStatus(1), "a");
+    c1.title = "cmd one";
+    c1.title_possibly_with_graphic_renditions = "cmd one";
+    const commands = &[_]Command{c1};
+    const sel = Selection{ .keyboard = .{ .index = 0 } };
+    const color_env = Env{ .no_color = false, .supports_emoji = true };
+    const text = try drawDashboard(allocator, commands, 80, false, .none, sel, color_env);
+    defer allocator.free(text);
+    // Color env should produce ANSI escape sequences.
+    try std.testing.expect(std.mem.indexOf(u8, text, "\x1B[") != null);
+}
+
+test "drawDashboard: narrow width does not underflow" {
+    const allocator = std.testing.allocator;
+    var c1 = Command.forTest(command_mod.runningStatus(1), "a");
+    c1.title = "a very long command title that exceeds the width";
+    c1.title_possibly_with_graphic_renditions = "a very long command title that exceeds the width";
+    const commands = &[_]Command{c1};
+    const sel = Selection{ .invisible = .{ .index = 0 } };
+    // Width smaller than the start_length + separator would cause underflow before the fix.
+    const text = try drawDashboard(allocator, commands, 5, false, .none, sel, plainEnv);
+    defer allocator.free(text);
+    // Should not crash and should produce some output.
+    try std.testing.expect(text.len > 0);
+}
+
+test "exitText: exit 0 with was_killed under auto_exit shows restart" {
+    const allocator = std.testing.allocator;
+    const commands = &[_]Command{Command.forTest(command_mod.exitStatus(0, true), null)};
+    const ct = CommandText{
+        .formatted_command_with_title = "cmd",
+        .title = "cmd",
+        .title_possibly_with_graphic_renditions = "cmd",
+        .cwd = ".",
+        .history = "",
+    };
+    const text = try exitText(allocator, commands, &ct, command_mod.exitStatus(0, true), .{ .auto_exit = 1 }, plainEnv);
+    defer allocator.free(text);
+    // Killed under auto_exit: not a clean exit, so restart is shown.
+    try std.testing.expect(std.mem.indexOf(u8, text, "restart") != null);
+}
+
+test "exitText: exit 0 without kill under auto_exit hides restart" {
+    const allocator = std.testing.allocator;
+    const commands = &[_]Command{Command.forTest(command_mod.exitStatus(0, false), null)};
+    const ct = CommandText{
+        .formatted_command_with_title = "cmd",
+        .title = "cmd",
+        .title_possibly_with_graphic_renditions = "cmd",
+        .cwd = ".",
+        .history = "",
+    };
+    const text = try exitText(allocator, commands, &ct, command_mod.exitStatus(0, false), .{ .auto_exit = 1 }, plainEnv);
+    defer allocator.free(text);
+    // Clean exit under auto_exit: restart is hidden.
+    try std.testing.expect(std.mem.indexOf(u8, text, "restart") == null);
+}
+
+test "exitTextAndHistory: history ending with newline" {
+    const allocator = std.testing.allocator;
+    var cmd = Command.forTest(command_mod.exitStatus(1, false), null);
+    cmd.title = "my command";
+    cmd.title_possibly_with_graphic_renditions = "my command";
+    cmd.history = "line one\nline two\n";
+    const text = try exitTextAndHistory(allocator, &cmd.text(), 1, 1, 1, plainEnv);
+    defer allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "line two") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "exit 1") != null);
+}
+
+test "drawDashboard: auto_exit=1 shows '1 command runs'" {
+    const allocator = std.testing.allocator;
+    var c1 = Command.forTest(command_mod.runningStatus(1), "a");
+    c1.title = "cmd one";
+    c1.title_possibly_with_graphic_renditions = "cmd one";
+    const commands = &[_]Command{c1};
+    const sel = Selection{ .invisible = .{ .index = 0 } };
+    const text = try drawDashboard(allocator, commands, 80, false, .{ .auto_exit = 1 }, sel, plainEnv);
+    defer allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "1 command") != null);
+}
+
+test "drawDashboard: auto_exit=2 shows '2 commands run'" {
+    const allocator = std.testing.allocator;
+    var c1 = Command.forTest(command_mod.runningStatus(1), "a");
+    c1.title = "cmd one";
+    c1.title_possibly_with_graphic_renditions = "cmd one";
+    var c2 = Command.forTest(command_mod.runningStatus(2), "b");
+    c2.title = "cmd two";
+    c2.title_possibly_with_graphic_renditions = "cmd two";
+    const commands = &[_]Command{c1, c2};
+    const sel = Selection{ .invisible = .{ .index = 0 } };
+    const text = try drawDashboard(allocator, commands, 80, false, .{ .auto_exit = 2 }, sel, plainEnv);
+    defer allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "2 commands") != null);
 }

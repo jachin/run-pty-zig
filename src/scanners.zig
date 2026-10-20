@@ -94,18 +94,26 @@ pub fn splitAlternateScreen(s: []const u8, allocator: std.mem.Allocator) ![]Part
     return parts.toOwnedSlice() catch @panic("oom");
 }
 
-/// Check if `s` contains a terminal query that needs a fake response.
+/// Check if `s` is a terminal query that needs a fake response.
+/// Only matches specific escape sequences, not arbitrary text ending in "t".
 pub fn isTerminalQuery(s: []const u8) bool {
-    return endsWith(s, "6n") or endsWith(s, "0t") or endsWith(s, "t") or
-        startsWith(s, "\x1B]10;") or startsWith(s, "\x1B]11;") or startsWith(s, "\x1B]4;");
+    // Cursor position request: \x1B[6n
+    if (endsWith(s, "\x1B[6n")) return true;
+    // Window size / state queries: \x1B[<digits>t (e.g. \x1B[0t, \x1B[13t, \x1B[21t)
+    if (startsWith(s, "\x1B[") and endsWith(s, "t") and s.len > 3) return true;
+    // OSC queries: \x1B]10;?, \x1B]11;?, \x1B]4;N;?
+    if (startsWith(s, "\x1B]10;") or startsWith(s, "\x1B]11;") or startsWith(s, "\x1B]4;")) return true;
+    return false;
 }
 
 /// Build a fake response to a terminal query so programs don't get stuck when
 /// stdin is not a TTY (non-interactive mode). Mirrors the original's
 /// `respondToRequestFake`.
 pub fn respondToRequestFake(allocator: std.mem.Allocator, request: []const u8) ![]const u8 {
-    if (endsWith(request, "6n")) return "\x1B[1;1R";
-    if (endsWith(request, "t")) return "\x1B[3;0;0t";
+    if (endsWith(request, "\x1B[6n")) return "\x1B[1;1R";
+    if (startsWith(request, "\x1B[") and endsWith(request, "t") and request.len > 3) {
+        return "\x1B[3;0;0t";
+    }
     if (startsWith(request, "\x1B]10;") or startsWith(request, "\x1B]4;")) {
         return try replaceFirst(allocator, request, "?", "rgb:ffff/ffff/ffff");
     }
@@ -177,9 +185,34 @@ test "respondToRequestFake" {
     const fg = respondToRequestFake(allocator, "\x1B]10;?\x07") catch unreachable;
     defer allocator.free(fg);
     try std.testing.expectEqualStrings("\x1B]10;rgb:ffff/ffff/ffff\x07", fg);
+    const bg = respondToRequestFake(allocator, "\x1B]11;?\x07") catch unreachable;
+    defer allocator.free(bg);
+    try std.testing.expectEqualStrings("\x1B]11;rgb:0000/0000/0000\x07", bg);
+    const pal = respondToRequestFake(allocator, "\x1B]4;0;?\x07") catch unreachable;
+    defer allocator.free(pal);
+    try std.testing.expectEqualStrings("\x1B]4;0;rgb:ffff/ffff/ffff\x07", pal);
     const unknown = respondToRequestFake(allocator, "\x1B]99;?\x07") catch unreachable;
     defer allocator.free(unknown);
     try std.testing.expectEqualStrings("", unknown);
+}
+
+test "isTerminalQuery: matches real queries" {
+    try std.testing.expect(isTerminalQuery("\x1B[6n"));
+    try std.testing.expect(isTerminalQuery("\x1B[0t"));
+    try std.testing.expect(isTerminalQuery("\x1B[13t"));
+    try std.testing.expect(isTerminalQuery("\x1B[21t"));
+    try std.testing.expect(isTerminalQuery("\x1B]10;?\x07"));
+    try std.testing.expect(isTerminalQuery("\x1B]11;?\x07"));
+    try std.testing.expect(isTerminalQuery("\x1B]4;0;?\x07"));
+}
+
+test "isTerminalQuery: does not match plain text" {
+    try std.testing.expect(!isTerminalQuery("result"));
+    try std.testing.expect(!isTerminalQuery("output"));
+    try std.testing.expect(!isTerminalQuery("input"));
+    try std.testing.expect(!isTerminalQuery("hello world"));
+    try std.testing.expect(!isTerminalQuery("t"));
+    try std.testing.expect(!isTerminalQuery(""));
 }
 
 test "splitAlternateScreen" {

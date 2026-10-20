@@ -518,3 +518,141 @@ test "parseInputFile: extra field" {
         try std.testing.expect(err == ParseError.ExtraField);
     }
 }
+
+test "parseInputFile: not an array" {
+    const allocator = std.heap.page_allocator;
+    const result = parseInputFile(allocator, "{\"command\": [\"x\"]}");
+    if (result) |_| {
+        unreachable;
+    } else |err| {
+        try std.testing.expect(err == ParseError.NotAnArray);
+    }
+}
+
+test "parseInputFile: command not an array" {
+    const allocator = std.heap.page_allocator;
+    const result = parseInputFile(allocator, "[{\"command\": \"echo\"}]");
+    if (result) |_| {
+        unreachable;
+    } else |err| {
+        try std.testing.expect(err == ParseError.CommandNotArray);
+    }
+}
+
+test "parseInputFile: command element not a string" {
+    const allocator = std.heap.page_allocator;
+    const result = parseInputFile(allocator, "[{\"command\": [1, 2]}]");
+    if (result) |_| {
+        unreachable;
+    } else |err| {
+        try std.testing.expect(err == ParseError.CommandNotString);
+    }
+}
+
+test "parseInputFile: title not a string" {
+    const allocator = std.heap.page_allocator;
+    const result = parseInputFile(allocator, "[{\"command\": [\"x\"], \"title\": 42}]");
+    if (result) |_| {
+        unreachable;
+    } else |err| {
+        try std.testing.expect(err == ParseError.TitleNotString);
+    }
+}
+
+test "parseInputFile: cwd not a string" {
+    const allocator = std.heap.page_allocator;
+    const result = parseInputFile(allocator, "[{\"command\": [\"x\"], \"cwd\": 42}]");
+    if (result) |_| {
+        unreachable;
+    } else |err| {
+        try std.testing.expect(err == ParseError.CwdNotString);
+    }
+}
+
+test "parseInputFile: status value not an array" {
+    const allocator = std.heap.page_allocator;
+    const result = parseInputFile(allocator, "[{\"command\": [\"x\"], \"status\": {\"Building\": \"🔨\"}}]");
+    if (result) |_| {
+        unreachable;
+    } else |err| {
+        try std.testing.expect(err == ParseError.StatusValueNotArray);
+    }
+}
+
+test "parseInputFile: status tuple wrong length" {
+    const allocator = std.heap.page_allocator;
+    const result = parseInputFile(allocator, "[{\"command\": [\"x\"], \"status\": {\"Building\": [\"🔨\"]}}]");
+    if (result) |_| {
+        unreachable;
+    } else |err| {
+        try std.testing.expect(err == ParseError.StatusValueNotArray);
+    }
+}
+
+test "parseArgs: single non-file arg returns error" {
+    const allocator = std.heap.page_allocator;
+    const result = parseArgs(allocator, &.{"%"});
+    // A single arg that's not a valid file returns an error message.
+    if (result) |r| {
+        switch (r) {
+            .error_message => |msg| allocator.free(msg),
+            else => @panic("expected error_message"),
+        }
+    } else |_| {
+        @panic("expected success with error_message");
+    }
+}
+
+test "parseArgs: repeated delimiters with no commands" {
+    const allocator = std.heap.page_allocator;
+    const result = try parseArgs(allocator, &.{"%", "%", "%"});
+    try std.testing.expect(result == .no_commands);
+}
+
+test "parseArgs: --auto-exit=auto" {
+    const allocator = std.heap.page_allocator;
+    const result = try parseArgs(allocator, &.{"--auto-exit=auto", "%", "echo", "hi"});
+    switch (result) {
+        .parsed => |p| {
+            defer allocator.free(p.commands);
+            try std.testing.expect(p.auto_exit == .auto_exit);
+        },
+        else => @panic("expected parsed"),
+    }
+}
+
+test "parseArgs: --auto-exit=234" {
+    const allocator = std.heap.page_allocator;
+    const result = try parseArgs(allocator, &.{"--auto-exit=234", "%", "echo", "hi"});
+    switch (result) {
+        .parsed => |p| {
+            defer allocator.free(p.commands);
+            try std.testing.expectEqual(@as(u32, 234), p.auto_exit.auto_exit);
+        },
+        else => @panic("expected parsed"),
+    }
+}
+
+test "parseArgs: --auto-exit=nope is an error" {
+    const allocator = std.heap.page_allocator;
+    const result = try parseArgs(allocator, &.{"--auto-exit=nope", "%", "echo", "hi"});
+    switch (result) {
+        .error_message => |msg| {
+            allocator.free(msg);
+        },
+        else => @panic("expected error_message"),
+    }
+}
+
+test "parseArgs: --auto-exit after delimiter is a command arg" {
+    const allocator = std.heap.page_allocator;
+    const result = try parseArgs(allocator, &.{"%", "echo", "--auto-exit=2"});
+    switch (result) {
+        .parsed => |p| {
+            defer allocator.free(p.commands);
+            try std.testing.expectEqual(@as(usize, 1), p.commands.len);
+            try std.testing.expectEqualStrings("echo", p.commands[0].command[0]);
+        },
+        else => @panic("expected parsed"),
+    }
+}

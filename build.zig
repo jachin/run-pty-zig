@@ -207,6 +207,24 @@ pub fn build(b: *std.Build) void {
     });
     const run_noninteractive_tests = b.addRunArtifact(noninteractive_tests);
 
+    const interactive_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/interactive.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_interactive_tests = b.addRunArtifact(interactive_tests);
+
+    const root_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_root_tests = b.addRunArtifact(root_tests);
+
     // Tests for the executable's root module (main.zig).
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
@@ -226,6 +244,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_pty_tests.step);
     test_step.dependOn(&run_scanners_tests.step);
     test_step.dependOn(&run_noninteractive_tests.step);
+    test_step.dependOn(&run_interactive_tests.step);
+    test_step.dependOn(&run_root_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.

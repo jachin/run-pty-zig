@@ -329,12 +329,19 @@ fn appendCapped(existing: []const u8, chunk: []const u8, max: usize) []const u8 
         break :blk o;
     } else blk: {
         const o = std.heap.page_allocator.alloc(u8, max) catch return existing;
-        const overflow = total - max;
-        const start = if (overflow < existing.len) overflow else 0;
-        const from_existing = existing.len - start;
-        std.mem.copyForwards(u8, o, existing[start..]);
-        const chunk_start = if (from_existing < max) from_existing else 0;
-        std.mem.copyForwards(u8, o[from_existing..], chunk[chunk_start..]);
+        // We want the last `max` bytes of (existing + chunk).
+        // The start position in the concatenation is (total - max).
+        const start_in_concat = total - max;
+        if (start_in_concat < existing.len) {
+            // Take tail of existing + all of chunk.
+            const from_existing = existing.len - start_in_concat;
+            std.mem.copyForwards(u8, o, existing[start_in_concat..]);
+            std.mem.copyForwards(u8, o[from_existing..], chunk);
+        } else {
+            // Take only from chunk: the offset is (start_in_concat - existing.len).
+            const offset_in_chunk = start_in_concat - existing.len;
+            std.mem.copyForwards(u8, o, chunk[offset_in_chunk..]);
+        }
         break :blk o;
     };
     // Free the old slice if it was heap-allocated (non-empty means it was
@@ -489,4 +496,104 @@ test "kill double-press state transitions" {
     // Press 3 (within DOUBLE_PRESS of press 2): would send SIGKILL.
     cmd.kill(false);
     try std.testing.expect(cmd.status.killing.last_kill_press != null);
+}
+
+test "appendCapped: empty existing, small chunk" {
+    const result = appendCapped("", "hello", 100);
+    defer std.heap.page_allocator.free(result);
+    try std.testing.expectEqualStrings("hello", result);
+}
+
+test "appendCapped: empty existing, chunk larger than max" {
+    const result = appendCapped("", "abcdefghij", 5);
+    defer std.heap.page_allocator.free(result);
+    try std.testing.expectEqualStrings("fghij", result);
+}
+
+test "appendCapped: existing + chunk fits in max" {
+    const existing = std.heap.page_allocator.alloc(u8, 3) catch unreachable;
+    std.mem.copyForwards(u8, existing, "abc");
+    const result = appendCapped(existing, "def", 10);
+    defer std.heap.page_allocator.free(result);
+    try std.testing.expectEqualStrings("abcdef", result);
+}
+
+test "appendCapped: existing + chunk exceeds max (tail of existing + all chunk)" {
+    const existing = std.heap.page_allocator.alloc(u8, 5) catch unreachable;
+    std.mem.copyForwards(u8, existing, "abcde");
+    const result = appendCapped(existing, "fghij", 7);
+    defer std.heap.page_allocator.free(result);
+    // Keep last 7 of "abcdefghij" = "cdefghij"[1..] = "defghij"
+    try std.testing.expectEqualStrings("defghij", result);
+}
+
+test "appendCapped: chunk alone exceeds max (keep tail of chunk)" {
+    const existing = std.heap.page_allocator.alloc(u8, 2) catch unreachable;
+    std.mem.copyForwards(u8, existing, "ab");
+    const result = appendCapped(existing, "cdefghijklmnop", 5);
+    defer std.heap.page_allocator.free(result);
+    // total = 14, start_in_concat = 9, offset_in_chunk = 7, chunk[7..] = "lmnop"
+    try std.testing.expectEqualStrings("lmnop", result);
+}
+
+test "pushHistory: text goes to history" {
+    var cmd = Command.forTest(runningStatus(1), null);
+    _ = cmd.pushHistory("hello world\n");
+    try std.testing.expectEqualStrings("hello world\n", cmd.history);
+    try std.testing.expectEqualStrings("", cmd.history_alternate_screen);
+}
+
+test "pushHistory: alternate screen text goes to history_alternate_screen" {
+    var cmd = Command.forTest(runningStatus(1), null);
+    _ = cmd.pushHistory("before\x1B[?1049halt screen text\x1B[?1049lafter");
+    try std.testing.expectEqualStrings("beforeafter", cmd.history);
+    try std.testing.expectEqualStrings("alt screen text", cmd.history_alternate_screen);
+}
+
+test "pushHistory: clear resets history" {
+    var cmd = Command.forTest(runningStatus(1), null);
+    _ = cmd.pushHistory("old output\n");
+    _ = cmd.pushHistory("\x1B[2Jnew output\n");
+    // After clear, history is reset and the chunk (including the clear seq) is appended.
+    try std.testing.expectEqualStrings("\x1B[2Jnew output\n", cmd.history);
+}
+
+test "pushHistory: status rule change returns true" {
+    var cmd = Command.forTest(runningStatus(1), null);
+    cmd.status_rules = &.{
+        .{ .pattern = "Building", .status = .{ .primary = "🔨", .degraded = "B" } },
+        .{ .pattern = "Done", .status = null },
+    };
+    // First match: null -> non-null (change).
+    const changed1 = cmd.pushHistory("now Building");
+    try std.testing.expect(changed1);
+    // Second match: non-null -> null (change).
+    const changed2 = cmd.pushHistory("all Done");
+    try std.testing.expect(changed2);
+    // No match: no change.
+    const changed3 = cmd.pushHistory("nothing here");
+    try std.testing.expect(!changed3);
+}
+
+test "updateStatusFromRules: ANSI-embedded pattern" {
+    var cmd = Command.forTest(runningStatus(1), null);
+    cmd.status_rules = &.{
+        .{ .pattern = "Building", .status = .{ .primary = "🔨", .degraded = "B" } },
+    };
+    // The pattern "Building" is embedded in ANSI codes; after stripping, it matches.
+    cmd.updateStatusFromRules("\x1B[32mBuilding\x1B[m the thing");
+    try std.testing.expect(cmd.status_from_rules != null);
+    try std.testing.expectEqualStrings("🔨", cmd.status_from_rules.?[0]);
+}
+
+test "updateStatusFromRules: last match wins" {
+    var cmd = Command.forTest(runningStatus(1), null);
+    cmd.status_rules = &.{
+        .{ .pattern = "Building", .status = .{ .primary = "🔨", .degraded = "B" } },
+        .{ .pattern = "Testing", .status = .{ .primary = "🧪", .degraded = "T" } },
+    };
+    // Both patterns in the same chunk: last rule wins.
+    cmd.updateStatusFromRules("Building then Testing");
+    try std.testing.expect(cmd.status_from_rules != null);
+    try std.testing.expectEqualStrings("🧪", cmd.status_from_rules.?[0]);
 }
