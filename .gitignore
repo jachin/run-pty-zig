@@ -1,1 +1,9 @@
+# Reference source (kept locally, not part of this project)
 run-pty/
+
+# Zig build artifacts
+zig-out/
+.zig-cache/
+
+# macOS
+.DS_Store
