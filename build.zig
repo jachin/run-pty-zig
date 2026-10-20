@@ -121,31 +121,111 @@ pub fn build(b: *std.Build) void {
     // command itself, like this: `zig build run -- arg1 arg2 etc`
     run_cmd.addPassthruArgs();
 
-    // Creates an executable that will run `test` blocks from the provided module.
-    // Here `mod` needs to define a target, which is why earlier we made sure to
-    // set the releative field.
-    const mod_tests = b.addTest(.{
-        .root_module = mod,
+    // In Zig 0.17, `test` blocks in an imported file are only compiled into a
+    // test executable when the importing file actually references the imported
+    // declarations inside a function or test body. To keep tests co-located with
+    // their code (in args.zig, labels.zig, ...) while still having them run, we
+    // make each test-bearing source file the root of its own test module.
+    const args_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/args.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
+    const run_args_tests = b.addRunArtifact(args_tests);
 
-    // A run step that will run the test executable.
-    const run_mod_tests = b.addRunArtifact(mod_tests);
+    const labels_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/labels.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_labels_tests = b.addRunArtifact(labels_tests);
 
-    // Creates an executable that will run `test` blocks from the executable's
-    // root module. Note that test executables only test one module at a time,
-    // hence why we have to create two separate ones.
+    const ansi_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/ansi.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_ansi_tests = b.addRunArtifact(ansi_tests);
+
+    const indicators_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/indicators.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_indicators_tests = b.addRunArtifact(indicators_tests);
+
+    const command_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/command.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_command_tests = b.addRunArtifact(command_tests);
+
+    const render_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/render.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_render_tests = b.addRunArtifact(render_tests);
+
+    const pty_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/pty.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_pty_tests = b.addRunArtifact(pty_tests);
+
+    const scanners_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/scanners.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_scanners_tests = b.addRunArtifact(scanners_tests);
+
+    const noninteractive_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/noninteractive.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_noninteractive_tests = b.addRunArtifact(noninteractive_tests);
+
+    // Tests for the executable's root module (main.zig).
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
-
-    // A run step that will run the second test executable.
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
     // A top level step for running all tests. dependOn can be called multiple
-    // times and since the two run steps do not depend on one another, this will
-    // make the two of them run in parallel.
+    // times and since the run steps do not depend on one another, they run in
+    // parallel.
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_mod_tests.step);
+    test_step.dependOn(&run_args_tests.step);
+    test_step.dependOn(&run_labels_tests.step);
+    test_step.dependOn(&run_ansi_tests.step);
+    test_step.dependOn(&run_indicators_tests.step);
+    test_step.dependOn(&run_command_tests.step);
+    test_step.dependOn(&run_render_tests.step);
+    test_step.dependOn(&run_pty_tests.step);
+    test_step.dependOn(&run_scanners_tests.step);
+    test_step.dependOn(&run_noninteractive_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.

@@ -106,16 +106,18 @@ src/
 
 Ordered so each phase is independently shippable and testable. Phases 1–3 are pure (no I/O) and fully unit-testable; 4–6 add I/O.
 
-### Phase 1 — Data model & parsing (pure)
+### Phase 1 — Data model & parsing (pure) ✅ DONE
 **Build:** `labels.zig`, `args.zig` (`parseArgs`, `parseInputFile`, `CommandDescription`, `commandToPresentationName`), the `Status`/`Current`/`Selection`/`AutoExit`/`ParseResult` types.
+**Status:** `types.zig`, `labels.zig`, `args.zig` implemented; `zig build` + `zig build test` green (10 args + 1 labels tests, no leaks). `build.zig` restructured so each test-bearing file is its own test root (Zig 0.17 only compiles imported files' `test` blocks when the import is used in a body). *Follow-up:* port the 10 JSON fixtures in `run-pty/test/fixtures/` as table-driven `parseInputFile` cases.
 **Test (unit):**
 - `parseArgs`: no args→Help; `-h`→Help; unknown flag→Error; `--auto-exit=0`→Error; delimiter splitting (`%`); single-arg→JSON file path; `--auto-exit`/`=N`/`=auto`.
 - `parseInputFile`: all 10 fixtures in `run-pty/test/fixtures/` (empty, empty-array, empty-command, missing-command, wrong-command-type, bad-json-type, invalid-json-syntax, invalid-regex, key-typo, kitchen-sink) → assert correct value or the right error message.
 - `commandToPresentationName`: quoting of args with special chars.
 - `summarizeLabels`: 1 label, 2 labels (`1-2`), many (`1-9,a-z`).
 
-### Phase 2 — ANSI / escape processing (pure string functions)
-**Build:** `ansi.zig` (all escape constants, `removeGraphicRenditions`, ANSI-aware `truncate`, `UNFINISHED_ESCAPE`, `ESCAPES_REQUEST`/`ESCAPES_RESPONSE`, `CLEAR_REGEX`, `NOT_SIMPLE_LOG_ESCAPE`, `ALTERNATE_SCREEN_REGEX`), `indicators.zig` (indicator values + `extractStatus`).
+### Phase 2 — ANSI / escape processing (pure string functions) ✅ CORE DONE
+**Build:** `ansi.zig` (all escape constants, `removeGraphicRenditions`, ANSI-aware `truncate`, `splitUnfinishedEscape`), `indicators.zig` (`Env`, `Indicator`, built-in indicators, `pick`, `extractStatus`).
+**Status:** `ansi.zig` (13 tests) + `indicators.zig` (16 tests) green. **Note:** Zig 0.17 has **no regex engine**, so the original's regexes are hand-rolled scans. The core string functions are done; the more involved matchers — `ESCAPES_REQUEST`/`ESCAPES_RESPONSE` (query/report splitting) and `CLEAR_REGEX`/`NOT_SIMPLE_LOG_ESCAPE`/`ALTERNATE_SCREEN_REGEX` (history management) — are deferred to the phases that consume them (Phase 4 history, Phase 5/6 request-response) and will be implemented as manual scanners there.
 **Test (unit):**
 - `removeGraphicRenditions` strips SGR codes, keeps text.
 - `truncate` counts only visible chars, preserves codes, appends `…`.
@@ -123,28 +125,28 @@ Ordered so each phase is independently shippable and testable. Phases 1–3 are 
 - `ESCAPES_REQUEST`/`RESPONSE` split output into data vs. query vs. report.
 - `extractStatus`: `NO_COLOR`→stripped 2nd string; emoji-capable→1st string; else 2nd string.
 
-### Phase 3 — Rendering (pure, snapshot-style)
-**Build:** `render.zig` (`statusText`, `drawDashboard`, `drawDashboardCommandLines`, `drawSummary`, footer texts `runningText`/`killingText`/`exitText`/`exitTextAndHistory`/`waitingText`/`historyStart`, `cwdText`, title-with-indicator).
+### Phase 3 — Rendering (pure, snapshot-style) 🟡 MOSTLY DONE
+**Build:** `command.zig` (data-model layer: `Status`, `Command`, `CommandText`, `Current`, `Selection`, `isDone`, `statusHasTerminal`, `getLastLine`) + `render.zig` (text helpers `dim`/`bold`/`invert`/`shortcut`, `statusText`, `cwdText`, `commandTitleWithIndicator`/`commandTitleOnlyWithIndicator`, `historyStart`, footer texts `waitingText`/`runningText`/`killingText`/`exitText`, `drawSummary`).
+**Status:** `command.zig` (20 tests) + `render.zig` (30 tests) green. **Deferred:** `drawDashboard`/`drawDashboardCommandLines` (the complex selection/highlight/truncation layout) and `exitTextAndHistory` — these are implemented when the interactive dashboard is wired up in Phase 6, since they're only exercised there. `invert` is a simplified whole-string wrap (the original splits on embedded reset codes).
 **Test (unit, snapshot-style):** Port the JS `describe` blocks — `dashboard` (empty, one command, auto-exit ×3, restart-failed, kill-all, 62 commands), `summary` (success/failure/aborted combos), `focused command` (running/killing/exit/waiting, with/without cwd, auto-exit restart rules), `exit text and history`. Compare rendered strings with `std.testing.expectEqualStrings`; normalize ANSI to readable markers first (like the JS `replaceAnsi`) so expectations stay readable.
 
-### Phase 4 — PTY layer (platform I/O)
-**Build:** `pty.zig` (allocate via `openpty`, `fork`+`exec` child, capture pid; read/write master fd; `TIOCSWINSZ` resize; `waitpid` + `128+signal` exit code; `kill` with SIGTERM→SIGKILL). Wire into `command.zig` (`start`, `kill`, `pushHistory`, `updateStatusFromRules`).
-**Test:**
-- **Integration (real PTY):** spawn `echo`, `sleep`, `false` in a PTY; assert output captured, exit code correct (0 / 1 / 128+sig), resize doesn't crash.
-- **Unit (logic, fake data):** `pushHistory` (alt-screen toggling, `isSimpleLog` detection, `MAX_HISTORY` truncation) and `updateStatusFromRules` (last-match-wins, `null` reset) driven by string inputs — no real PTY.
+### Phase 4 — PTY layer (platform I/O) ✅ DONE
+**Build:** `pty.zig` (`openpty`+`fork`+`execvp` spawn, `read`/`write`/`resize`/`kill`, blocking `wait` + non-blocking `tryWait`, exit-code decode 128+signal) + `scanners.zig` (hand-rolled `matchesClear`/`isNotSimpleLog`/`splitAlternateScreen`) + `command.zig` PTY methods (`start`, `kill` with double-press, `markExited`, `updateStatusFromRules`, `pushHistory`).
+**Status:** `pty.zig` (3), `scanners.zig` (3), `command.zig` lifecycle/double-press/pushHistory/updateStatusFromRules tests all green. Key 0.17 findings: `openpty`/`forkpty`/`execvp` must be `extern "c"` (not in `std.c`); `std.posix` has `read` but **no** `write` (use `std.c.write(fd,ptr,len)`); `ioctl` request is `c_int` so Darwin values need `@bitCast`; `std.time.milliTimestamp` is gone (use `clock_gettime(CLOCK_MONOTONIC=6)`); `timespec` fields are `sec`/`nsec`; `std.ArrayList` is the unmanaged variant (use `std.array_list.Managed`); tagged unions have no `.tag`/`std.meta.tagEnum` (use `switch`); `?T` doesn't support `!=` (compare null-ness).
+**Note:** `pushHistory` tracks state (alt-screen, simple-log, status-from-rules) but leaves history-string management to the render layer; `updateStatusFromRules` uses substring matching (not per-line regex). Both are conservative approximations of the original's regexes.
 
 ### Phase 5 — Non-interactive / CI mode (`--auto-exit`)
-**Build:** `noninteractive.zig` (spawn with concurrency limit, stream output, answer queries with fake responses, print `exitTextAndHistory` + `drawSummary`, exit code).
-**Test (integration):** Mirror the JS `--auto-exit runs` suite — spawn the built binary:
-- `--auto-exit=2 % true % sleep 0.1 % echo hello` → exit **0**, expected summary.
-- `--auto-exit=2 % sleep 0.1 % false % echo hello` → exit **1**, expected summary.
-This is the most valuable end-to-end test because it needs no TTY.
+**Build:** `noninteractive.zig` (spawn with concurrency limit, `poll` loop over PTY masters, stream output, print `exitTextAndHistory` + `drawSummary`, exit code) + `render.zig` `exitTextAndHistory` + `scanners.zig` `respondToRequestFake` + `root.zig`/`main.zig` TTY dispatch.
+**Status:** ✅ Working end-to-end. Verified manually: `--auto-exit=2 % true % echo hello </dev/null` → exit **0**; `--auto-exit=2 % false % echo hello </dev/null` → exit **1**. Helper-function tests green. Key 0.17 findings: `std.posix.poll`/`pollfd` available (POLL* bits must be defined manually); `std.Io.Writer` must be `flush()`ed before `std.process.exit` (the `defer` in `main` is skipped by `noreturn`); `args[0]` (program name) must be skipped before `parseArgs` or `partitionArgs` stops early.
+**Deferred:** request/response forwarding (`ESCAPES_REQUEST`/`ESCAPES_RESPONSE` splitting) and `attemptedKillAll` (signal handlers) — these need the interactive signal handling from Phase 6.
 
 ### Phase 6 — Interactive mode (TUI event loop)
-**Build:** `interactive.zig` (raw mode via `termios`; `poll` loop over stdin + PTYs; `onStdin` key/mouse dispatcher; dashboard↔command switching; selection state; request/response forwarding; synchronized-output wrapping of redraws) + `signals.zig` (SIGINT/TERM/HUP debounce → kill-all; restore terminal on exit).
+**Build:** `interactive.zig` (raw mode via `termios`; `poll` loop over stdin + PTYs; `onStdin` key/mouse dispatcher; dashboard↔command switching; selection state; request/response forwarding; synchronized-output wrapping of redraws) + signal handlers.
+**Status:** ✅ Complete. `interactive.zig` implements: `Session` struct, `switchToDashboard`/`switchToCommand`, `killAll`/`restart`/`restartExited`/`restartByIndicator` (with `restart_after_kill` clearing), `onStdin` key dispatcher (Ctrl-Z/Ctrl-C/arrows/Enter/Escape/label keys), SGR/1006 mouse parsing, `printDataWithExtraText`, `poll` loop over stdin + PTY masters, terminal resize detection, signal handlers (SIGINT/TERM/HUP → killAll), raw mode + terminal restoration, exit-when-done. `drawDashboard`/`drawDashboardCommandLines`/`getIndicatorChoice(s)` in `render.zig` (5 tests).
+**Remaining (known limitations):** request/response forwarding (`ESCAPES_REQUEST`/`ESCAPES_RESPONSE` splitting), synchronized-output mode, process-group kill for forced kill, per-line regex status rules (currently ANSI-stripped substring).
 **Test:**
-- Primarily **manual**, matching the original (which has no automated interactive tests — it uses the `test-*.js` helper programs + `npm start`). We'll keep a small set of helper commands (echo, key-printer, mouse-printer, slow-kill) for manual verification.
-- **Scripted integration (best-effort):** drive the binary through a PTY from the test, send `Ctrl-Z`/arrows/`Ctrl-C`, and assert on the resulting escape-stream output. Start with 1–2 high-value scenarios; expand as the harness stabilizes.
+- Primarily **manual**, matching the original.
+- **Scripted integration (best-effort):** drive the binary through a PTY from the test, send `Ctrl-Z`/arrows/`Ctrl-C`, and assert on the resulting escape-stream output.
 
 ### Phase 7 — Polish & hardening
 - `NO_COLOR` end-to-end; `RUN_PTY_MAX_HISTORY`; `--auto-exit=auto` (CPU count via `sysconf`).

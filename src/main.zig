@@ -12,5 +12,6 @@ pub fn main(init: std.process.Init) !void {
     var stdout: Io.File.Writer = .init(.stdout(), io, &buf);
     defer stdout.interface.flush() catch {};
 
-    try run_pty_zig.run(&stdout.interface, args);
+    const stdin_is_tty = std.c.isatty(0) != 0;
+    try run_pty_zig.run(&stdout.interface, args, stdin_is_tty);
 }
