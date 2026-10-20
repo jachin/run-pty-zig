@@ -62,13 +62,25 @@ fn detectEnv() Env {
     return Env{ .no_color = false, .supports_emoji = true };
 }
 
+pub const version = "0.0.1";
+
 /// Entry point for the tool. `args` is the full argv; `args[0]` is the program
 /// name. `stdin_is_tty` decides between interactive (Phase 6) and
 /// non-interactive (CI) modes.
 pub fn run(writer: *Io.Writer, args: []const [:0]const u8, stdin_is_tty: bool) !void {
     const allocator = std.heap.page_allocator;
-    // Skip the program name (args[0]).
-    const parse_result = try parseArgs(allocator, if (args.len > 0) args[1..] else args);
+    const rest = if (args.len > 0) args[1..] else args;
+
+    // Handle --version / -V before parsing.
+    for (rest) |arg| {
+        if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-V")) {
+            try writer.print("run-pty-zig {s}\n", .{ version });
+            writer.flush() catch {};
+            return;
+        }
+    }
+
+    const parse_result = try parseArgs(allocator, rest);
     defer switch (parse_result) {
         .parsed => |p| allocator.free(p.commands),
         .error_message => |msg| allocator.free(msg),
@@ -77,7 +89,7 @@ pub fn run(writer: *Io.Writer, args: []const [:0]const u8, stdin_is_tty: bool) !
 
     switch (parse_result) {
         .help => {
-            try writer.writeAll("run-pty-zig: usage not yet implemented\n");
+            try writer.print("run-pty-zig {s}\n\nUsage: run-pty-zig [--auto-exit=N] <delimiter> <cmd1> <delimiter> <cmd2> ...\n       run-pty-zig [--auto-exit=N] <config.json>\n\nFlags:\n  --auto-exit=N    Exit when all commands finish; at most N run in parallel.\n  --auto-exit=auto Same, but N = CPU count.\n  -h, --help       Show this help.\n  -V, --version    Show version.\n", .{ version });
         },
         .no_commands => {},
         .error_message => |msg| {

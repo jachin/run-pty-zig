@@ -1,5 +1,7 @@
 # run-pty-zig
 
+**Version 0.0.1**
+
 Run several commands concurrently in pseudo-terminals (PTYs), showing one command's output at a time, with a dashboard to switch between them. A lighter, easier alternative to `tmux`/`concurrently`.
 
 This is a port of [lydell/run-pty](https://github.com/lydell/run-pty) to [Zig](https://ziglang.org/) (0.17+), targeting macOS (Apple Silicon and Intel). Zero external dependencies — everything is in the Zig standard library.
