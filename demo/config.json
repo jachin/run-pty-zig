@@ -1,0 +1,89 @@
+[
+  {
+    "command": ["sh", "demo/watch.sh"],
+    "title": "file watcher",
+    "status": {
+      "Watching": ["👀", "W"],
+      "change detected": ["📝", "C"]
+    }
+  },
+  {
+    "command": ["sh", "demo/build.sh"],
+    "title": "build",
+    "status": {
+      "Building": ["🔨", "B"],
+      "Build complete": ["✅", "D"]
+    }
+  },
+  {
+    "command": ["sh", "demo/test.sh"],
+    "title": "tests",
+    "status": {
+      "Running": ["🧪", "T"],
+      "failed": ["❌", "F"]
+    }
+  },
+  {
+    "command": ["sh", "demo/server.sh"],
+    "title": "web server",
+    "status": {
+      "Ready": ["🌐", "S"],
+      "500": ["💥", "E"]
+    }
+  },
+  {
+    "command": ["sh", "demo/migrate.sh"],
+    "title": "migrations",
+    "status": {
+      "Running database": ["🗃️", "M"],
+      "migrations applied": ["✅", "D"]
+    }
+  },
+  {
+    "command": ["sh", "demo/tail.sh"],
+    "title": "log tail",
+    "status": {
+      "Tailing": ["📋", "L"],
+      "ERROR": ["🚨", "E"]
+    }
+  },
+  {
+    "command": ["sh", "demo/repl.sh"],
+    "title": "REPL",
+    "status": {
+      "mylang": ["💻", "R"]
+    }
+  },
+  {
+    "command": ["sh", "demo/compile.sh"],
+    "title": "compiler",
+    "status": {
+      "Compiling": ["⚙️", "C"],
+      "error": ["❌", "E"]
+    }
+  },
+  {
+    "command": ["sh", "demo/install.sh"],
+    "title": "install",
+    "status": {
+      "Installing": ["📦", "I"],
+      "Installed": ["✅", "D"]
+    }
+  },
+  {
+    "command": ["sh", "demo/crash.sh"],
+    "title": "worker",
+    "status": {
+      "Starting": ["🚀", "S"],
+      "Unhandled": ["💀", "X"]
+    }
+  },
+  {
+    "command": ["sh", "demo/tui.sh"],
+    "title": "deploy TUI",
+    "status": {
+      "Deploying": ["🚢", "D"],
+      "Deploy complete": ["🎉", "D"]
+    }
+  }
+]
