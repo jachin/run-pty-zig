@@ -6,13 +6,24 @@ Run several commands concurrently in pseudo-terminals (PTYs), showing one comman
 
 This is a port of [lydell/run-pty](https://github.com/lydell/run-pty) to [Zig](https://ziglang.org/) (0.17+), targeting macOS (Apple Silicon and Intel). Zero external dependencies — everything is in the Zig standard library.
 
-## Build
+## Install
+
+### Homebrew (macOS)
 
 ```sh
-zig build
+brew tap jachin/run-pty-zig
+brew install run-pty
 ```
 
-The binary is at `zig-out/bin/run_pty_zig`.
+### From source
+
+```sh
+git clone https://github.com/jachin/run-pty-zig
+cd run-pty-zig
+zig build install --prefix /usr/local
+```
+
+The binary is installed as `run-pty`.
 
 ## Usage
 
@@ -21,7 +32,7 @@ The binary is at `zig-out/bin/run_pty_zig`.
 The first non-flag argument is the delimiter (e.g. `%`). Commands are separated by it:
 
 ```sh
-run_pty_zig % npm run watch % npm run server
+run-pty % npm run watch % npm run server
 ```
 
 ### JSON config file
@@ -29,7 +40,7 @@ run_pty_zig % npm run watch % npm run server
 Pass a single argument that is a path to a JSON file:
 
 ```sh
-run_pty_zig ./config.json
+run-pty ./config.json
 ```
 
 The JSON format is a top-level array of command objects:
