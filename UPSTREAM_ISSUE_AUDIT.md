@@ -1,0 +1,25 @@
+# Upstream issue audit
+
+Inventory source: GitHub REST API `repos/lydell/run-pty/issues?state=all&per_page=100`, filtered to issues (pull requests excluded), checked 2026-10-20. The repository has 18 issues in this result. Issue links are the source reports; where a distinct upstream fix is identifiable, it is noted below.
+
+| Issue | State | Reported behavior / disposition in this port |
+|---|---|---|
+| [#8 Keyboard shortcuts missing on Windows sometimes](https://github.com/lydell/run-pty/issues/8) | Closed | Vertical cursor movement can hide shortcut overlays; fixed here by recognizing vertical CSI commands in `src/scanners.zig`, with tests for absolute and relative moves. The upstream Windows-specific follow-up is documented in the 5.0.1 changelog. |
+| [#28 ANSI color escape sequences leak](https://github.com/lydell/run-pty/issues/28) | Closed | Split escape sequences must remain buffered until complete; already handled by `src/ansi.zig` `splitUnfinishedEscape` and its CSI/OSC tests. Upstream fix is recorded in the changelog. |
+| [#32 Start with some tasks not running](https://github.com/lydell/run-pty/issues/32) | Closed | Bounded parallel execution is already provided by `--auto-exit=N`; later commands remain waiting until a slot opens (`src/noninteractive.zig`, `src/interactive.zig`). |
+| [#34 variables in advanced mode](https://github.com/lydell/run-pty/issues/34) | Closed | Shell-style variable interpolation is not part of direct argv/JSON command execution; the report does not identify a parser defect in this port. |
+| [#35 Default to visualize one process](https://github.com/lydell/run-pty/issues/35) | Closed | A display preference/feature request; a single command already opens directly, while multiple commands intentionally start at the dashboard (`src/interactive.zig`). |
+| [#37 Mouse click for dashboard](https://github.com/lydell/run-pty/issues/37) | Closed | Dashboard command rows already support SGR mouse selection and opening a command (`src/interactive.zig`). |
+| [#38 Output breaks in Warp](https://github.com/lydell/run-pty/issues/38) | Closed | Terminal-emulator-specific report; no reproducible macOS Zig-port defect was established. |
+| [#43 Support for mixed outputs](https://github.com/lydell/run-pty/issues/43) | Open | Requests simultaneous mixed output so users can identify which process logged an error. This is a feature outside the stated one-command-at-a-time display behavior, not a correctness gap. |
+| [#45 Commands unexpectedly exit 0 in GitHub Actions](https://github.com/lydell/run-pty/issues/45) | Closed | Report concerns Node PTY behavior in a particular CI setup; this port’s PTY exit status is derived from `waitpid` and covered by exit-code tests. No reproducing Zig/macOS defect was found. |
+| [#53 Node process uses 100% CPU](https://github.com/lydell/run-pty/issues/53) | Closed | Node-runtime issue; this port blocks in `poll` when PTYs are live and has no analogous busy loop identified. |
+| [#55 JSON configuration from stdin](https://github.com/lydell/run-pty/issues/55) | Closed | Optional configuration transport feature; this port accepts a JSON file path and does not treat stdin as config. Not required for command behavior parity. |
+| [#56 Ctrl-C usability at a specific job](https://github.com/lydell/run-pty/issues/56) | Closed | Keyboard/control-flow UX report; existing kill-all and focused-command handling cover the relevant behavior. No additional actionable mismatch was established. |
+| [#61 Segmentation fault when passing a command](https://github.com/lydell/run-pty/issues/61) | Closed | Node package/runtime failure; this port uses its own argv parsing and `execvp` child path. No corresponding reproducible failure was found. |
+| [#70 Use synchronized output?](https://github.com/lydell/run-pty/issues/70) | Closed | Synchronized terminal updates are already emitted around dashboard redraws in `src/interactive.zig`. |
+| [#71 Ctrl-C/Ctrl-Z issues on Node 22.17](https://github.com/lydell/run-pty/issues/71) | Closed | Node-version-specific behavior; this port installs its own signal handling and raw-mode configuration. No equivalent failure was demonstrated. |
+| [#72 Escape or click to go to dashboard](https://github.com/lydell/run-pty/issues/72) | Open | Escape and SGR mouse input from a focused command now return to the dashboard; regression test added in `src/interactive.zig`. |
+| [#79 Resize an exited PTY](https://github.com/lydell/run-pty/issues/79) | Closed | Node-PTY resize-after-exit report; this port resizes only active PTYs in its interactive loop. No applicable defect found. |
+
+The actionable parity changes are covered by scanner tests for #8 and interactive state-transition tests for #72. Other issues are already covered by existing behavior/tests or are upstream-runtime/platform reports and feature requests outside the relevant project scope; no additional changes were made for them.

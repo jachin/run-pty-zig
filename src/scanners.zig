@@ -41,30 +41,23 @@ pub fn matchesClear(s: []const u8) bool {
 
 /// True when `s` contains an escape that makes the log "not simple" (i.e. the
 /// output uses cursor moves / clears that can't be replayed as a plain log).
-/// Matches the common cases from the original's `NOT_SIMPLE_LOG_ESCAPE`:
-/// clear-down (`0?J`), cursor moves (`F`/`L`/`M`/`S`/`T`/`u`/`s`), and cursor
-/// up (`<n>A`) that isn't a simple `\n`+`1A` pair.
+/// Matches clear-down (`0?J`) and CSI sequences that move the cursor vertically
+/// or otherwise rewrite previous lines.
 pub fn isNotSimpleLog(s: []const u8) bool {
     // Clear-down: \x1B[0J or \x1B[J.
     if (contains(s, "\x1B[0J") or contains(s, "\x1B[J")) return true;
-    // Cursor moves that rewrite previous lines.
-    const moves = [_][]const u8{
-        "\x1B[F", "\x1B[L", "\x1B[M", "\x1B[S", "\x1B[T", "\x1B[u", "\x1B[s",
-    };
-    for (moves) |m| {
-        if (contains(s, m)) return true;
-    }
-    // Cursor up: \x1B[<n>A where <n> is a positive number.
     var i: usize = 0;
-    while (i + 3 < s.len) : (i += 1) {
-        if (s[i] == '\x1B' and s[i + 1] == '[') {
-            var j = i + 2;
-            var has_digit = false;
-            while (j < s.len and s[j] >= '0' and s[j] <= '9') : (j += 1) {
-                has_digit = true;
+    while (i + 1 < s.len) : (i += 1) {
+        if (s[i] != '\x1B' or s[i + 1] != '[') continue;
+        var j = i + 2;
+        while (j < s.len and (s[j] < 0x40 or s[j] > 0x7E)) : (j += 1) {}
+        if (j < s.len) {
+            switch (s[j]) {
+                'A', 'B', 'E', 'F', 'H', 'L', 'M', 'S', 'T', 'd', 'f', 's', 'u' => return true,
+                else => {},
             }
-            if (has_digit and j < s.len and s[j] == 'A') return true;
         }
+        i = j;
     }
     return false;
 }
@@ -174,7 +167,12 @@ test "isNotSimpleLog" {
     try std.testing.expect(isNotSimpleLog("\x1B[0J"));
     try std.testing.expect(isNotSimpleLog("\x1B[2A"));
     try std.testing.expect(isNotSimpleLog("\x1B[F"));
+    try std.testing.expect(isNotSimpleLog("\x1B[12;1H"));
+    try std.testing.expect(isNotSimpleLog("\x1B[12f"));
+    try std.testing.expect(isNotSimpleLog("\x1B[2B"));
+    try std.testing.expect(isNotSimpleLog("\x1B[2E"));
     try std.testing.expect(!isNotSimpleLog("plain text\nmore text"));
+    try std.testing.expect(!isNotSimpleLog("\x1B[4G"));
     try std.testing.expect(!isNotSimpleLog("\x1B[0m"));
 }
 

@@ -461,6 +461,10 @@ pub const Session = struct {
     fn onStdin(self: *Session, data: []const u8) !void {
         switch (self.current) {
             .command => |cmd| {
+                if (isSgrMouseEvent(data) or std.mem.eql(u8, data, KEY_ESC)) {
+                    try self.switchToDashboard(false);
+                    return;
+                }
                 const command = &self.commands[cmd.index];
                 switch (command.status) {
                     .waiting => {
@@ -536,6 +540,10 @@ pub const Session = struct {
                 }
             },
         }
+    }
+
+    fn isSgrMouseEvent(data: []const u8) bool {
+        return data.len >= 5 and data[0] == 0x1B and data[1] == '[' and data[2] == '<';
     }
 
     fn moveSelection(self: *Session, delta: i32) !void {
@@ -1043,6 +1051,50 @@ test "handleMouse: SGR prefix parsing (x/y extraction)" {
     try std.testing.expectEqual(@as(usize, 5), x);
     try std.testing.expectEqual(@as(usize, 3), y);
     try std.testing.expectEqual(@as(u8, 'M'), data[i]);
+}
+
+test "onStdin: mouse click in command view returns to dashboard" {
+    const allocator = std.testing.allocator;
+    var cmds = [_]Command{
+        Command.forTest(command_mod.runningStatus(100), "1"),
+        Command.forTest(.waiting, "2"),
+    };
+    var out_buf: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&out_buf);
+    var session = Session.init(allocator, &cmds, .{ .auto_exit = 2 }, .{ .no_color = true, .supports_emoji = false }, &writer);
+    defer {
+        switch (session.current) {
+            .dashboard => |d| {
+                for (d.previous_render) |old_line| allocator.free(old_line);
+                if (d.previous_render.len > 0) allocator.free(d.previous_render);
+            },
+            else => {},
+        }
+        session.deinit();
+    }
+    session.current = .{ .command = .{ .index = 0 } };
+
+    try session.onStdin("\x1B[<0;5;3M");
+
+    try std.testing.expect(switch (session.current) {
+        .dashboard => true,
+        else => false,
+    });
+
+    switch (session.current) {
+        .dashboard => |d| {
+            for (d.previous_render) |old_line| allocator.free(old_line);
+            if (d.previous_render.len > 0) allocator.free(d.previous_render);
+        },
+        else => unreachable,
+    }
+    session.current = .{ .command = .{ .index = 0 } };
+    try session.onStdin(KEY_ESC);
+
+    try std.testing.expect(switch (session.current) {
+        .dashboard => true,
+        else => false,
+    });
 }
 
 test "Darwin termios ICANON and ECHO flags are cleared (regression: macOS Terminal password prompt)" {

@@ -2,6 +2,8 @@
 run-pty/
 ghostty/
 
+homebrew-run-pty-zig
+
 # Zig build artifacts
 zig-out/
 .zig-cache/
