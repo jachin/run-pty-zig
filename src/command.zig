@@ -16,6 +16,12 @@ fn toStatusValue(status: ?StatusTuple) ?StatusValue {
     return if (status) |s| .{ s.primary, s.degraded } else null;
 }
 
+fn statusValueEql(a: ?StatusValue, b: ?StatusValue) bool {
+    if (a == null and b == null) return true;
+    if (a == null or b == null) return false;
+    return std.mem.eql(u8, a.?[0], b.?[0]) and std.mem.eql(u8, a.?[1], b.?[1]);
+}
+
 /// Milliseconds between two kill presses before the second is treated as a
 /// force-kill (SIGKILL).
 const DOUBLE_PRESS: u64 = 500;
@@ -136,6 +142,11 @@ pub const Command = struct {
 
     /// Spawn the command in a new PTY and transition to the `running` state.
     pub fn start(self: *Command, cols: u16, rows: u16) Pty.Error!void {
+        self.history = "";
+        self.history_alternate_screen = "";
+        self.is_simple_log = true;
+        self.is_on_alternate_screen = false;
+        self.status_from_rules = self.default_status;
         const p = try Pty.spawn(self.file, self.args, if (self.cwd.len > 0) self.cwd else null, cols, rows);
         self.pty = p;
         self.status = .{ .running = .{ .pid = p.pid } };
@@ -211,14 +222,24 @@ pub const Command = struct {
                 },
             }
         }
-        const a_null = self.status_from_rules == null;
-        const b_null = previous == null;
-        return a_null != b_null;
+        return !statusValueEql(self.status_from_rules, previous);
     }
 
     /// The full history (for re-display when switching back to a command).
     pub fn joinHistory(self: *const Command) []const u8 {
-        return self.history;
+        if (self.history_alternate_screen.len == 0) {
+            if (self.is_on_alternate_screen) {
+                return std.mem.concat(std.heap.page_allocator, u8, &.{ self.history, ansi.ENABLE_ALTERNATE_SCREEN }) catch self.history;
+            }
+            return self.history;
+        }
+        const suffix = if (self.is_on_alternate_screen) "" else ansi.DISABLE_ALTERNATE_SCREEN;
+        return std.mem.concat(std.heap.page_allocator, u8, &.{
+            self.history,
+            ansi.ENABLE_ALTERNATE_SCREEN,
+            self.history_alternate_screen,
+            suffix,
+        }) catch self.history;
     }
 
     /// Record that the child has exited with `exit_code`. If the command was in

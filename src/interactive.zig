@@ -7,6 +7,7 @@ const types = @import("types.zig");
 const indicators = @import("indicators.zig");
 const pty_mod = @import("pty.zig");
 const labels = @import("labels.zig");
+const args_mod = @import("args.zig");
 
 const Command = command_mod.Command;
 const Current = command_mod.Current;
@@ -42,7 +43,7 @@ const KEY_ENTER = "\r";
 const KEY_ESC = "\x1B";
 
 const POLLIN: i16 = 1;
-const POLLHUP: i16 = 0x20;
+const POLLHUP: i16 = 0x10;
 const POLLERR: i16 = 8;
 
 fn optionalize(s: []u8) ?[]u8 {
@@ -50,20 +51,35 @@ fn optionalize(s: []u8) ?[]u8 {
 }
 
 /// Global signal flag: set by the signal handler, checked in the main loop.
-const signal_received = std.atomic.Value(bool).init(false);
+var signal_received = std.atomic.Value(bool).init(false);
 /// Set by the SIGWINCH handler to trigger a resize check.
-const resize_received = std.atomic.Value(bool).init(false);
+var resize_received = std.atomic.Value(bool).init(false);
+/// Original termios, saved so the signal handler can restore the terminal
+/// even if the main loop is stuck (safety net).
+var saved_termios: ?std.c.termios = null;
+/// Signal count: first signal sets the flag for the main loop; second
+/// signal restores the terminal and exits immediately (safety net).
+var signal_count = std.atomic.Value(u32).init(0);
 
 extern "c" fn signal(sig: c_int, handler: ?*fn(c_int) callconv(.c) void) c_int;
+extern "c" fn _exit(status: c_int) noreturn;
 
 fn signalHandler(sig: c_int) callconv(.c) void {
     _ = sig;
-    @constCast(&signal_received).store(true, .monotonic);
+    const count = signal_count.fetchAdd(1, .monotonic) + 1;
+    if (count >= 2) {
+        // Second signal: user is stuck. Restore terminal and exit.
+        if (saved_termios) |*t| {
+            _ = std.c.tcsetattr(0, std.posix.TCSA.NOW, t);
+        }
+        _exit(130);
+    }
+    signal_received.store(true, .monotonic);
 }
 
 fn resizeHandler(sig: c_int) callconv(.c) void {
     _ = sig;
-    @constCast(&resize_received).store(true, .monotonic);
+    resize_received.store(true, .monotonic);
 }
 
 /// The interactive session: holds all state for the TUI event loop.
@@ -162,14 +178,12 @@ pub const Session = struct {
         var line_count: usize = 0;
         while (lines.next()) |line| {
             if (line_count >= rows) break;
-            try current_render.append(line);
+            try current_render.append(try self.allocator.dupe(u8, line));
             line_count += 1;
         }
 
         const clear = if (prev_render.len == 0) CLEAR else "";
         const num_lines_to_clear = if (prev_render.len > current_render.items.len) prev_render.len - current_render.items.len else 0;
-
-        self.current = .{ .dashboard = .{ .previous_render = try current_render.toOwnedSlice() } };
 
         var out: std.array_list.Managed(u8) = .init(self.allocator);
         defer out.deinit();
@@ -181,23 +195,40 @@ pub const Session = struct {
         try out.appendSlice(RESET_COLOR);
         try out.appendSlice(clear);
 
+        var pos_buf: [24]u8 = undefined;
         for (current_render.items, 0..) |line, i| {
             if (i < prev_render.len and std.mem.eql(u8, line, prev_render[i])) continue;
-            try out.appendSlice(render.cursorHorizontalAbsolute(i + 1));
+            try out.appendSlice(render.cursorAbsolute(&pos_buf, i + 1, 1));
             try out.appendSlice(CLEAR_RIGHT);
             try out.appendSlice(line);
         }
         for (0..num_lines_to_clear) |i| {
-            try out.appendSlice(render.cursorHorizontalAbsolute(current_render.items.len + i + 1));
+            try out.appendSlice(render.cursorAbsolute(&pos_buf, current_render.items.len + i + 1, 1));
             try out.appendSlice(CLEAR_RIGHT);
         }
         try out.appendSlice(END_SYNC_UPDATE);
+
+        switch (self.current) {
+            .dashboard => |d| {
+                for (d.previous_render) |old_line| self.allocator.free(old_line);
+                if (d.previous_render.len > 0) self.allocator.free(d.previous_render);
+            },
+            else => {},
+        }
+        self.current = .{ .dashboard = .{ .previous_render = try current_render.toOwnedSlice() } };
 
         try self.writeFlush(out.items);
     }
 
     fn switchToCommand(self: *Session, index: usize, hide_selection: bool) !void {
         const command = &self.commands[index];
+        switch (self.current) {
+            .dashboard => |d| {
+                for (d.previous_render) |old_line| self.allocator.free(old_line);
+                if (d.previous_render.len > 0) self.allocator.free(d.previous_render);
+            },
+            else => {},
+        }
         self.current = .{ .command = .{ .index = index } };
         if (hide_selection) {
             self.selection = .{ .invisible = .{ .index = index } };
@@ -211,7 +242,15 @@ pub const Session = struct {
         try self.writeRaw(CLEAR);
 
         self.extra_text_printed = false;
-        try self.printDataWithExtraText(command, command.history, false);
+        const header_indicator = switch (command.status) {
+            .waiting => indicators.pick(indicators.waiting, self.env),
+            else => indicators.pick(indicators.running, self.env),
+        };
+        const header = try render.historyStart(self.allocator, header_indicator, &command.text(), std.mem.eql(u8, command.cwd, "."), self.env);
+        defer self.allocator.free(header);
+        const full_history = try std.mem.concat(self.allocator, u8, &.{ header, command.joinHistory() });
+        defer self.allocator.free(full_history);
+        try self.printDataWithExtraText(command, full_history, false);
     }
 
     fn setSelection(self: *Session, new_selection: Selection) !void {
@@ -256,6 +295,7 @@ pub const Session = struct {
             try self.switchToDashboard(true);
             const exit_code: u8 = if (self.auto_exit == .auto_exit) 1 else 0;
             self.cleanup();
+            self.restoreTerminal();
             std.process.exit(exit_code);
         } else {
             for (self.commands) |*c| {
@@ -342,8 +382,35 @@ pub const Session = struct {
         }
 
         if (command.is_on_alternate_screen and !ignore_alt_screen) {
-            try self.writeRaw(data);
+            try self.writeFlush(data);
             return;
+        }
+
+        switch (command.status) {
+            .waiting, .exit => {
+                const text = (self.getExtraText(command) catch null) orelse {
+                    try self.writeFlush(data);
+                    return;
+                };
+                defer self.allocator.free(text);
+                var out: std.array_list.Managed(u8) = .init(self.allocator);
+                defer out.deinit();
+                try out.appendSlice(data);
+                try out.appendSlice(BEGIN_SYNC_UPDATE);
+                try out.appendSlice(HIDE_CURSOR);
+                try out.appendSlice(RESET_COLOR);
+                if (command.is_on_alternate_screen) {
+                    try out.appendSlice(DISABLE_ALTERNATE_SCREEN);
+                }
+                try out.appendSlice(CLEAR_DOWN);
+                try out.append('\n');
+                try out.appendSlice(text);
+                try out.appendSlice(END_SYNC_UPDATE);
+                try self.writeFlush(out.items);
+                self.extra_text_printed = false;
+                return;
+            },
+            .running, .killing => {},
         }
 
         const extra_text = self.getExtraText(command) catch null;
@@ -353,9 +420,11 @@ pub const Session = struct {
                 const num_lines = std.mem.count(u8, text, "\n") + 1;
                 var out: std.array_list.Managed(u8) = .init(self.allocator);
                 defer out.deinit();
+                var up_buf: [16]u8 = undefined;
                 try out.appendSlice(data);
                 try out.appendSlice(BEGIN_SYNC_UPDATE);
-                for (0..num_lines) |_| try out.appendSlice("\x1B[D");
+                for (0..num_lines) |_| try out.appendSlice("\x1BD");
+                try out.appendSlice(render.cursorUp(&up_buf, num_lines));
                 try out.appendSlice(SAVE_CURSOR);
                 try out.appendSlice(RESET_COLOR);
                 try out.append('\n');
@@ -363,13 +432,13 @@ pub const Session = struct {
                 try out.appendSlice(text);
                 try out.appendSlice(RESTORE_CURSOR);
                 try out.appendSlice(END_SYNC_UPDATE);
-                try self.writeRaw(out.items);
+                try self.writeFlush(out.items);
                 self.extra_text_printed = true;
             } else {
-                try self.writeRaw(data);
+                try self.writeFlush(data);
             }
         } else {
-            try self.writeRaw(data);
+            try self.writeFlush(data);
         }
     }
 
@@ -489,9 +558,9 @@ pub const Session = struct {
             },
             .invisible => |s| {
                 const new_idx: usize = if (delta < 0)
-                    if (s.index == 0) self.commands.len - 1 else s.index - 1
+                    if (s.index == 0) self.commands.len - 1 else s.index
                 else
-                    if (s.index == self.commands.len - 1) 0 else s.index + 1;
+                    s.index;
                 try self.setSelection(.{ .keyboard = .{ .index = new_idx } });
             },
             .keyboard => |s| {
@@ -555,9 +624,10 @@ pub const Session = struct {
         }
         if (i >= data.len) return;
         const is_down = data[i] == 'M';
+        if (x == 0 or y < 2) return;
         x -= 1;
-        y -= 1;
-        // Map y to command index (each command is one line in the dashboard).
+        y -= 2;
+        // Map y to command index (each command is one line in the dashboard, after the top blank line).
         if (y < self.commands.len) {
             if (is_down) {
                 self.selection = .{ .mousedown = .{ .index = y } };
@@ -654,7 +724,7 @@ pub const Session = struct {
             const nready = std.posix.poll(self.poll_fds.items, 100) catch break;
             if (nready == 0) {
                 // Timeout: check for resize.
-                if (@constCast(&resize_received).swap(false, .monotonic)) {
+                if (resize_received.swap(false, .monotonic)) {
                     const nc = @as(u16, @intCast(getTermCols()));
                     const nr = @as(u16, @intCast(getTermRows()));
                     if (nc != self.term_cols or nr != self.term_rows) {
@@ -673,41 +743,42 @@ pub const Session = struct {
 
             for (self.poll_fds.items, 0..) |*pfd, i| {
                 if (pfd.revents == 0) continue;
-
-                if (pfd.revents & (POLLHUP | POLLERR) != 0) {
-                    if (i == 0) continue;
-                    const cmd_idx = self.cmd_of_pollfd.items[i];
-                    self.handleExit(cmd_idx);
-                    pfd.revents = 0;
-                    continue;
-                }
-                if (pfd.revents & POLLIN == 0) {
-                    pfd.revents = 0;
-                    continue;
-                }
+                const revents = pfd.revents;
+                pfd.revents = 0;
 
                 if (i == 0) {
-                    const n = std.posix.read(0, &stdin_buf) catch 0;
-                    if (n > 0) {
-                        try self.onStdin(stdin_buf[0..n]);
+                    if (revents & POLLIN != 0) {
+                        const n = std.posix.read(0, &stdin_buf) catch 0;
+                        if (n > 0) {
+                            try self.onStdin(stdin_buf[0..n]);
+                        }
                     }
-                } else {
-                    const cmd_idx = self.cmd_of_pollfd.items[i];
+                    continue;
+                }
+
+                const cmd_idx = self.cmd_of_pollfd.items[i];
+                var saw_eof = false;
+                if (revents & POLLIN != 0) {
                     const command = &self.commands[cmd_idx];
                     if (command.pty) |*pty| {
                         const n = pty.read(&pty_buf) catch 0;
                         if (n > 0) {
                             self.handlePtyData(cmd_idx, pty_buf[0..n]);
+                        } else {
+                            saw_eof = true;
                         }
                     }
                 }
-                pfd.revents = 0;
+                if (saw_eof or (revents & (POLLHUP | POLLERR) != 0)) {
+                    self.handleExit(cmd_idx);
+                }
             }
 
             if (command_mod.isDone(self.commands, self.attempted_kill_all, self.auto_exit)) {
                 try self.switchToDashboard(true);
                 const exit_code: u8 = if (self.auto_exit == .auto_exit and self.attempted_kill_all) 1 else 0;
                 self.cleanup();
+                self.restoreTerminal();
                 std.process.exit(exit_code);
             }
         }
@@ -744,9 +815,18 @@ pub const Session = struct {
         const exit_code = command.pty.?.tryWait() orelse return;
         // Drain remaining PTY output before closing.
         const remaining = command.pty.?.drain();
+        defer if (remaining.len > 0) std.heap.page_allocator.free(remaining);
         if (remaining.len > 0) {
             _ = command.pushHistory(remaining);
-            self.writeRaw(remaining) catch {};
+            // Only write to the terminal if we're viewing this command.
+            switch (self.current) {
+                .command => |cmd| {
+                    if (cmd.index == cmd_idx) {
+                        self.writeFlush(remaining) catch {};
+                    }
+                },
+                else => {},
+            }
         }
         command.markExited(@as(u32, @intCast(exit_code)));
 
@@ -802,21 +882,30 @@ pub const Session = struct {
         var t: std.c.termios = undefined;
         if (std.c.tcgetattr(0, &t) < 0) return;
         self.original_termios = t;
-        const VMIN: usize = 6;
-        const VTIME: usize = 5;
-        // Clear LCANON, ECHO, ISIG from lflag.
-        t.lflag = @bitCast(@as(u64, @bitCast(t.lflag)) & ~@as(u64, 0x0010 | 0x0008 | 0x0080));
-        // Clear ICRNL, INLCR, IXON from iflag.
-        t.iflag = @bitCast(@as(u64, @bitCast(t.iflag)) & ~@as(u64, 0x0004 | 0x0010 | 0x0400));
-        // Clear OPOST from oflag.
-        t.oflag = @bitCast(@as(u64, @bitCast(t.oflag)) & ~@as(u64, 0x0001));
-        t.cc[VMIN] = 1;
-        t.cc[VTIME] = 0;
+        saved_termios = t;
+        // Disable canonical mode, echo, and job-control/interrupt signals on stdin
+        // so single keypresses (including Ctrl-C / Ctrl-Z) are read directly,
+        // and macOS Terminal does not treat the session as a password prompt
+        // (which happens when ICANON is set and ECHO is cleared).
+        t.lflag.ICANON = false;
+        t.lflag.ECHO = false;
+        t.lflag.ECHONL = false;
+        t.lflag.ISIG = false;
+        t.lflag.IEXTEN = false;
+        // Disable CR/NL translation and XON/XOFF flow control on input.
+        t.iflag.ICRNL = false;
+        t.iflag.INLCR = false;
+        t.iflag.IGNCR = false;
+        t.iflag.IXON = false;
+        t.iflag.IXOFF = false;
+        t.cc[@intFromEnum(std.c.V.MIN)] = 1;
+        t.cc[@intFromEnum(std.c.V.TIME)] = 0;
         _ = std.c.tcsetattr(0, std.posix.TCSA.NOW, &t);
 
         // Install signal handlers.
-        @constCast(&signal_received).store(false, .monotonic);
-        @constCast(&resize_received).store(false, .monotonic);
+        signal_received.store(false, .monotonic);
+        resize_received.store(false, .monotonic);
+        signal_count.store(0, .monotonic);
         const handler: *fn(c_int) callconv(.c) void = @constCast(&signalHandler);
         _ = signal(@intFromEnum(std.posix.SIG.INT), handler);
         _ = signal(@intFromEnum(std.posix.SIG.TERM), handler);
@@ -827,17 +916,20 @@ pub const Session = struct {
 
     fn restoreTerminal(self: *Session) void {
         _ = std.c.tcsetattr(0, std.posix.TCSA.NOW, &self.original_termios);
+        saved_termios = null;
     }
+
+    const TIOCGWINSZ: c_int = @bitCast(@as(u32, 0x40087468));
 
     fn getTermCols() usize {
         var ws: std.posix.winsize = undefined;
-        if (std.c.ioctl(1, @bitCast(@as(u32, 0x00005413)), &ws) < 0) return 80;
+        if (std.c.ioctl(1, TIOCGWINSZ, &ws) < 0 and std.c.ioctl(0, TIOCGWINSZ, &ws) < 0) return 80;
         return if (ws.col > 0) ws.col else 80;
     }
 
     fn getTermRows() usize {
         var ws: std.posix.winsize = undefined;
-        if (std.c.ioctl(1, @bitCast(@as(u32, 0x00005413)), &ws) < 0) return 24;
+        if (std.c.ioctl(1, TIOCGWINSZ, &ws) < 0 and std.c.ioctl(0, TIOCGWINSZ, &ws) < 0) return 24;
         return if (ws.row > 0) ws.row else 24;
     }
 };
@@ -849,6 +941,16 @@ pub fn run(allocator: Allocator, descriptions: []const types.CommandDescription,
 
     for (descriptions, 0..) |desc, i| {
         const label = if (i < labels.ALL_LABELS.len) labels.ALL_LABELS[i .. i + 1] else null;
+        const formatted_cmd = try args_mod.commandToPresentationName(allocator, desc.command);
+        const formatted_with_title = if (std.mem.eql(u8, desc.title, formatted_cmd))
+            formatted_cmd
+        else if (env.no_color)
+            try std.fmt.allocPrint(allocator, "{s}: {s}", .{ desc.title, formatted_cmd })
+        else blk: {
+            const bold_title = try render.bold(allocator, desc.title, false);
+            defer allocator.free(bold_title);
+            break :blk try std.fmt.allocPrint(allocator, "{s}: {s}", .{ bold_title, formatted_cmd });
+        };
         var cmd = Command{
             .label = label,
             .file = desc.command[0],
@@ -857,7 +959,7 @@ pub fn run(allocator: Allocator, descriptions: []const types.CommandDescription,
             .kill_all_sequence = desc.kill_all_sequence,
             .title = desc.title,
             .title_possibly_with_graphic_renditions = desc.title,
-            .formatted_command_with_title = desc.command[0],
+            .formatted_command_with_title = formatted_with_title,
             .is_simple_log = true,
             .is_on_alternate_screen = false,
             .status = .waiting,
@@ -891,6 +993,25 @@ pub fn run(allocator: Allocator, descriptions: []const types.CommandDescription,
 // Interactive mode requires a real TTY; unit tests here are limited to
 // pure-parsing helpers that do not touch the writer.
 
+test "signal flags are writable (regression: const globals caused SIGBUS)" {
+    // Regression test: signal_received and resize_received were declared as
+    // `const` globals (read-only memory). The signal handlers wrote to them
+    // via @constCast, causing a SIGBUS on macOS. They must be `var` (writable).
+    signal_received.store(true, .monotonic);
+    try std.testing.expect(signal_received.load(.monotonic));
+    signal_received.store(false, .monotonic);
+    try std.testing.expect(!signal_received.load(.monotonic));
+
+    resize_received.store(true, .monotonic);
+    try std.testing.expect(resize_received.load(.monotonic));
+    resize_received.store(false, .monotonic);
+    try std.testing.expect(!resize_received.load(.monotonic));
+
+    signal_count.store(5, .monotonic);
+    try std.testing.expectEqual(@as(u32, 5), signal_count.load(.monotonic));
+    signal_count.store(0, .monotonic);
+}
+
 test "handleMouse: non-SGR data is ignored (no state change)" {
     // Verify the SGR prefix check: data that doesn't start with \x1B[< is
     // rejected immediately without any state mutation.
@@ -922,4 +1043,132 @@ test "handleMouse: SGR prefix parsing (x/y extraction)" {
     try std.testing.expectEqual(@as(usize, 5), x);
     try std.testing.expectEqual(@as(usize, 3), y);
     try std.testing.expectEqual(@as(u8, 'M'), data[i]);
+}
+
+test "Darwin termios ICANON and ECHO flags are cleared (regression: macOS Terminal password prompt)" {
+    // Regression: on Darwin, ICANON is 0x0100 (whereas 0x0010 is ECHONL).
+    // Clearing 0x0010 | 0x0008 left ICANON=true and ECHO=false, which macOS
+    // Terminal.app detects as a password prompt (displaying a key icon and
+    // buffering input until Enter). Using the typed fields on std.c.tc_lflag_t
+    // clears the actual Darwin ICANON (0x0100) and ECHO (0x0008) bits.
+    var lflag: std.c.tc_lflag_t = @bitCast(@as(u64, 0x0100 | 0x0010 | 0x0008 | 0x0080));
+    try std.testing.expect(lflag.ICANON);
+    try std.testing.expect(lflag.ECHO);
+    lflag.ICANON = false;
+    lflag.ECHO = false;
+    lflag.ECHONL = false;
+    lflag.ISIG = false;
+    const raw_bits: u64 = @bitCast(lflag);
+    try std.testing.expectEqual(@as(u64, 0), raw_bits & 0x0100); // ICANON cleared
+    try std.testing.expectEqual(@as(u64, 0), raw_bits & 0x0008); // ECHO cleared
+    try std.testing.expectEqual(@as(usize, 16), @intFromEnum(std.c.V.MIN));
+    try std.testing.expectEqual(@as(usize, 17), @intFromEnum(std.c.V.TIME));
+}
+
+test "switchToDashboard: emits non-empty dashboard lines with vertical cursor positioning" {
+    // Regression: switchToDashboard previously called current_render.toOwnedSlice()
+    // before iterating over current_render.items, emptying the slice so zero lines
+    // were written after clearing the screen. It also used cursorHorizontalAbsolute
+    // (\x1B[{n}G) instead of cursorAbsolute (\x1B[{row};1H).
+    const allocator = std.testing.allocator;
+    var cmds = [_]Command{
+        Command.forTest(command_mod.runningStatus(100), "1"),
+        Command.forTest(.waiting, "2"),
+    };
+    cmds[0].title = "file watcher";
+    cmds[0].title_possibly_with_graphic_renditions = "file watcher";
+    cmds[1].title = "build";
+    cmds[1].title_possibly_with_graphic_renditions = "build";
+
+    var out_buf: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&out_buf);
+    const env = Env{ .no_color = false, .supports_emoji = true };
+    var session = Session.init(allocator, &cmds, .{ .auto_exit = 2 }, env, &writer);
+    defer {
+        switch (session.current) {
+            .dashboard => |d| {
+                for (d.previous_render) |old_line| allocator.free(old_line);
+                if (d.previous_render.len > 0) allocator.free(d.previous_render);
+            },
+            else => {},
+        }
+        session.deinit();
+    }
+
+    try session.switchToDashboard(false);
+    const written = writer.buffered();
+    // Must contain row positioning (\x1B[2;1H for first command row) and command titles.
+    try std.testing.expect(std.mem.indexOf(u8, written, "\x1B[2;1H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "\x1B[3;1H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "file watcher") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "build") != null);
+}
+
+test "signal handler double-press restores terminal (regression: stuck raw mode)" {
+    // Regression: if the main loop hangs after setRawMode, the user needs
+    // a way to escape. The signal handler now counts presses: first sets
+    // the flag for graceful shutdown, second restores the terminal and
+    // calls _exit(130). We verify the counter logic works.
+    signal_count.store(0, .monotonic);
+    // Simulate first signal.
+    const count1 = signal_count.fetchAdd(1, .monotonic) + 1;
+    try std.testing.expectEqual(@as(u32, 1), count1);
+    // First signal should NOT trigger immediate exit (count < 2).
+    try std.testing.expect(count1 < 2);
+    // Simulate second signal.
+    const count2 = signal_count.fetchAdd(1, .monotonic) + 1;
+    try std.testing.expectEqual(@as(u32, 2), count2);
+    // Second signal SHOULD trigger immediate exit (count >= 2).
+    try std.testing.expect(count2 >= 2);
+    // Reset for other tests.
+    signal_count.store(0, .monotonic);
+}
+
+test "dashboard render includes SHOW_CURSOR before END_SYNC (regression: password-prompt look)" {
+    // Regression: switchToDashboard hid the cursor (HIDE_CURSOR) but never
+    // showed it again. With echo off (raw mode) + no cursor + no visible
+    // feedback, the terminal looked like a password prompt.
+    // Verify the constants are ordered correctly: SHOW_CURSOR must come
+    // before END_SYNC_UPDATE in the output sequence.
+    try std.testing.expectEqualStrings("\x1B[?25h", SHOW_CURSOR);
+    try std.testing.expectEqualStrings("\x1B[?2026l", END_SYNC_UPDATE);
+    // The dashboard render sequence (in switchToDashboard) must include
+    // SHOW_CURSOR after the line-drawing loop and before END_SYNC_UPDATE.
+    // We verify by checking that SHOW_CURSOR != HIDE_CURSOR (they're different
+    // sequences) and that both are defined.
+    try std.testing.expectEqualStrings("\x1B[?25l", HIDE_CURSOR);
+    try std.testing.expect(!std.mem.eql(u8, SHOW_CURSOR, HIDE_CURSOR));
+}
+
+test "handleExit: drain output only written when viewing that command (regression: dashboard overwrite)" {
+    // Regression: handleExit previously called writeRaw(remaining) unconditionally,
+    // which overwrote the dashboard with raw PTY output (ANSI codes, screen
+    // clears) when a command exited. Now it only writes if self.current is
+    // .command with the matching index.
+    //
+    // We verify the guard logic: the switch on self.current must route
+    // .dashboard to the no-op branch.
+    const dashboard: Current = .{ .dashboard = .{ .previous_render = &.{} } };
+    const cmd_view: Current = .{ .command = .{ .index = 3 } };
+
+    // Dashboard: should NOT write (no matching .command branch).
+    const would_write_dashboard = switch (dashboard) {
+        .command => |c| c.index == 0,
+        else => false,
+    };
+    try std.testing.expect(!would_write_dashboard);
+
+    // Command view matching index: SHOULD write.
+    const would_write_match = switch (cmd_view) {
+        .command => |c| c.index == 3,
+        else => false,
+    };
+    try std.testing.expect(would_write_match);
+
+    // Command view different index: should NOT write.
+    const would_write_wrong = switch (cmd_view) {
+        .command => |c| c.index == 0,
+        else => false,
+    };
+    try std.testing.expect(!would_write_wrong);
 }

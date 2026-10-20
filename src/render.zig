@@ -105,13 +105,22 @@ pub fn iconWidth(env: Env) usize {
 }
 
 pub fn emojiWidthFix(env: Env) []const u8 {
-    return if (env.no_color or !env.supports_emoji) "" else cursorHorizontalAbsolute(3);
+    return if (env.no_color or !env.supports_emoji) "" else "\x1B[3G";
 }
 
-pub fn cursorHorizontalAbsolute(n: usize) []const u8 {
+pub fn cursorHorizontalAbsolute(buf: []u8, n: usize) []const u8 {
     // `\x1B[{n}G`
-    var buf: [16]u8 = undefined;
-    return std.fmt.bufPrint(&buf, "\x1B[{d}G", .{ n }) catch unreachable;
+    return std.fmt.bufPrint(buf, "\x1B[{d}G", .{ n }) catch unreachable;
+}
+
+pub fn cursorAbsolute(buf: []u8, row: usize, col: usize) []const u8 {
+    // `\x1B[{row};{col}H`
+    return std.fmt.bufPrint(buf, "\x1B[{d};{d}H", .{ row, col }) catch unreachable;
+}
+
+pub fn cursorUp(buf: []u8, n: usize) []const u8 {
+    // `\x1B[{n}A`
+    return std.fmt.bufPrint(buf, "\x1B[{d}A", .{ n }) catch unreachable;
 }
 
 // ---------------------------------------------------------------------------
@@ -610,9 +619,10 @@ pub fn drawDashboardCommandLines(
         // Assemble the line.
         var line_buf: std.array_list.Managed(u8) = .init(allocator);
         defer line_buf.deinit();
+        var cha_buf: [16]u8 = undefined;
         try line_buf.appendSlice(start_combined);
         try line_buf.appendSlice(RESET_COLOR);
-        try line_buf.appendSlice(cursorHorizontalAbsolute(start_length + 1));
+        try line_buf.appendSlice(cursorHorizontalAbsolute(&cha_buf, start_length + 1));
         try line_buf.appendSlice(CLEAR_RIGHT);
         try line_buf.appendSlice(final_end);
         try line_buf.appendSlice(RESET_COLOR);

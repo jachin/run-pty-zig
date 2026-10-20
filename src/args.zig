@@ -164,7 +164,7 @@ fn parseCommandDescription(allocator: Allocator, value: std.json.Value) ParseErr
     }
     const status_owned = try status.toOwnedSlice();
 
-    var default_status: ?types.StatusTuple = undefined;
+    var default_status: ?types.StatusTuple = null;
     if (obj.get("defaultStatus")) |ds| {
         default_status = try parseStatusTuple(ds);
     }

@@ -7,7 +7,18 @@ DIR=$(cd "$(dirname "$0")/.." && pwd)
 cd "$DIR"
 
 # Build if needed.
+needs_build=0
 if [ ! -x zig-out/bin/run_pty_zig ] || [ build.zig -nt zig-out/bin/run_pty_zig ]; then
+    needs_build=1
+else
+    for f in src/*.zig; do
+        if [ "$f" -nt zig-out/bin/run_pty_zig ]; then
+            needs_build=1
+            break
+        fi
+    done
+fi
+if [ "$needs_build" = 1 ]; then
     echo "Building run-pty-zig..."
     zig build
 fi
