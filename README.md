@@ -1,6 +1,6 @@
 # run-pty-zig
 
-**Version 0.0.1**
+**Version 0.1.0**
 
 Run several commands concurrently in pseudo-terminals (PTYs), showing one command's output at a time, with a dashboard to switch between them. A lighter, easier alternative to `tmux`/`concurrently`.
 
