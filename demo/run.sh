@@ -8,11 +8,11 @@ cd "$DIR"
 
 # Build if needed.
 needs_build=0
-if [ ! -x zig-out/bin/run_pty_zig ] || [ build.zig -nt zig-out/bin/run_pty_zig ]; then
+if [ ! -x zig-out/bin/run-pty ] || [ build.zig -nt zig-out/bin/run-pty ]; then
     needs_build=1
 else
     for f in src/*.zig; do
-        if [ "$f" -nt zig-out/bin/run_pty_zig ]; then
+        if [ "$f" -nt zig-out/bin/run-pty ]; then
             needs_build=1
             break
         fi
@@ -24,4 +24,4 @@ if [ "$needs_build" = 1 ]; then
 fi
 
 # Launch with the demo config.
-exec zig-out/bin/run_pty_zig --auto-exit=auto demo/config.json
+exec zig-out/bin/run-pty --auto-exit=auto demo/config.json
