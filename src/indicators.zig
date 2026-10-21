@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ansi = @import("ansi.zig");
+const types = @import("types.zig");
 
 /// Environment flags that decide how indicators are rendered.
 pub const Env = struct {
@@ -79,20 +80,18 @@ pub const folder = Indicator{
 };
 
 /// A status value from a config `status` rule: a two-string tuple
-/// `[primary, degraded]` where `primary` is the emoji (2 cols) and `degraded`
+/// (`primary`, `degraded`) where `primary` is the emoji (2 cols) and `degraded`
 /// is the single-character form.
-pub const StatusValue = [2][]const u8;
+pub const StatusValue = types.StatusTuple;
 
 /// Choose which string of a config status value to display, based on the
-/// environment. Returns a newly-allocated slice (owned by `allocator`) when
-/// NO_COLOR is set (the color codes are stripped); otherwise it returns one of
-/// the input strings as-is (caller must not free it in that case).
-pub fn extractStatus(allocator: Allocator, status: ?StatusValue, env: Env) !?[]const u8 {
-    if (status == null) return null;
-    const s = status.?;
-    if (env.no_color) return try ansi.removeGraphicRenditions(allocator, s[1]);
-    if (!env.supports_emoji) return s[1];
-    return s[0];
+/// environment. Always returns a newly-allocated slice owned by `allocator`
+/// when `status` is non-null, so the caller can unconditionally `free` it.
+pub fn extractStatus(allocator: Allocator, status: ?StatusValue, env: Env) !?[]u8 {
+    const s = status orelse return null;
+    if (env.no_color) return try ansi.removeGraphicRenditions(allocator, s.degraded);
+    if (!env.supports_emoji) return try allocator.dupe(u8, s.degraded);
+    return try allocator.dupe(u8, s.primary);
 }
 
 test "pick selects by environment" {
@@ -116,18 +115,20 @@ test "exitIndicator: 0 and 130 are clean, others are failures" {
 
 test "extractStatus: null, emoji, color, no_color" {
     const allocator = std.testing.allocator;
-    const value: StatusValue = .{ "🚀", "\x1B[94mR\x1B[m" };
+    const value: StatusValue = .{ .primary = "🚀", .degraded = "\x1B[94mR\x1B[m" };
 
     // null -> null
     const null_result = try extractStatus(allocator, null, .{ .no_color = false, .supports_emoji = true });
     try std.testing.expect(null_result == null);
 
-    // emoji-capable -> first string (borrowed)
+    // emoji-capable -> first string (owned)
     const emoji = (try extractStatus(allocator, value, .{ .no_color = false, .supports_emoji = true })).?;
+    defer allocator.free(emoji);
     try std.testing.expectEqualStrings("🚀", emoji);
 
-    // no emoji -> second string (borrowed)
+    // no emoji -> second string (owned)
     const color = (try extractStatus(allocator, value, .{ .no_color = false, .supports_emoji = false })).?;
+    defer allocator.free(color);
     try std.testing.expectEqualStrings("\x1B[94mR\x1B[m", color);
 
     // NO_COLOR -> second string with color stripped (owned)

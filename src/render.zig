@@ -40,14 +40,54 @@ pub const KEYS = struct {
 // Text styling helpers.
 // ---------------------------------------------------------------------------
 
+fn appendDim(out: *std.array_list.Managed(u8), s: []const u8, no_color: bool) !void {
+    if (no_color) {
+        try out.appendSlice(s);
+    } else {
+        try out.appendSlice("\x1B[2m");
+        try out.appendSlice(s);
+        try out.appendSlice(RESET_COLOR);
+    }
+}
+
+fn appendBold(out: *std.array_list.Managed(u8), s: []const u8, no_color: bool) !void {
+    if (no_color) {
+        try out.appendSlice(s);
+    } else {
+        try out.appendSlice("\x1B[1m");
+        try out.appendSlice(s);
+        try out.appendSlice(RESET_COLOR);
+    }
+}
+
+fn appendInvert(out: *std.array_list.Managed(u8), s: []const u8, no_color: bool) !void {
+    if (no_color) {
+        try out.appendSlice(s);
+    } else {
+        try out.appendSlice("\x1B[7m");
+        try out.appendSlice(s);
+        try out.appendSlice(RESET_COLOR);
+    }
+}
+
+fn appendShortcut(out: *std.array_list.Managed(u8), s: []const u8, pad: bool, no_color: bool) !void {
+    try appendDim(out, "[", no_color);
+    try appendBold(out, s, no_color);
+    try appendDim(out, "]", no_color);
+    if (pad) {
+        const target: usize = KEYS.kill.len;
+        if (target > s.len) {
+            try out.appendNTimes(' ', target - s.len);
+        }
+    }
+}
+
 /// Wrap `s` in dim (faint) ANSI codes, unless NO_COLOR. Returns an owned slice.
 pub fn dim(allocator: Allocator, s: []const u8, no_color: bool) ![]u8 {
     if (no_color) return allocator.dupe(u8, s);
     var out: std.array_list.Managed(u8) = .init(allocator);
-    defer out.deinit();
-    try out.appendSlice("\x1B[2m");
-    try out.appendSlice(s);
-    try out.appendSlice(RESET_COLOR);
+    errdefer out.deinit();
+    try appendDim(&out, s, no_color);
     return out.toOwnedSlice();
 }
 
@@ -55,10 +95,8 @@ pub fn dim(allocator: Allocator, s: []const u8, no_color: bool) ![]u8 {
 pub fn bold(allocator: Allocator, s: []const u8, no_color: bool) ![]u8 {
     if (no_color) return allocator.dupe(u8, s);
     var out: std.array_list.Managed(u8) = .init(allocator);
-    defer out.deinit();
-    try out.appendSlice("\x1B[1m");
-    try out.appendSlice(s);
-    try out.appendSlice(RESET_COLOR);
+    errdefer out.deinit();
+    try appendBold(&out, s, no_color);
     return out.toOwnedSlice();
 }
 
@@ -68,10 +106,8 @@ pub fn bold(allocator: Allocator, s: []const u8, no_color: bool) ![]u8 {
 pub fn invert(allocator: Allocator, s: []const u8, no_color: bool) ![]u8 {
     if (no_color) return allocator.dupe(u8, s);
     var out: std.array_list.Managed(u8) = .init(allocator);
-    defer out.deinit();
-    try out.appendSlice("\x1B[7m");
-    try out.appendSlice(s);
-    try out.appendSlice(RESET_COLOR);
+    errdefer out.deinit();
+    try appendInvert(&out, s, no_color);
     return out.toOwnedSlice();
 }
 
@@ -79,22 +115,8 @@ pub fn invert(allocator: Allocator, s: []const u8, no_color: bool) ![]u8 {
 /// longest key ("ctrl+c") when `pad` is true. Returns an owned slice.
 pub fn shortcut(allocator: Allocator, s: []const u8, pad: bool, no_color: bool) ![]u8 {
     var out: std.array_list.Managed(u8) = .init(allocator);
-    defer out.deinit();
-    const open = try dim(allocator, "[", no_color);
-    defer allocator.free(open);
-    try out.appendSlice(open);
-    const body = try bold(allocator, s, no_color);
-    defer allocator.free(body);
-    try out.appendSlice(body);
-    const close = try dim(allocator, "]", no_color);
-    defer allocator.free(close);
-    try out.appendSlice(close);
-    if (pad) {
-        const target: usize = KEYS.kill.len;
-        if (target > s.len) {
-            for (0..(target - s.len)) |_| try out.append(' ');
-        }
-    }
+    errdefer out.deinit();
+    try appendShortcut(&out, s, pad, no_color);
     return out.toOwnedSlice();
 }
 
@@ -150,8 +172,8 @@ pub fn statusText(status: Status, status_from_rules: ?StatusValue, use_separate_
 /// running indicator when there is none.
 fn statusValueIndicator(value: ?StatusValue, env: Env) []const u8 {
     if (value) |v| {
-        if (env.no_color or !env.supports_emoji) return v[1];
-        return v[0];
+        if (env.no_color or !env.supports_emoji) return v.degraded;
+        return v.primary;
     }
     return pick(running, env);
 }
@@ -160,30 +182,45 @@ fn statusValueIndicator(value: ?StatusValue, env: Env) []const u8 {
 // Title / cwd / history-start.
 // ---------------------------------------------------------------------------
 
+fn appendCwdText(out: *std.array_list.Managed(u8), command: *const CommandText, is_process_cwd: bool, env: Env) !void {
+    if (is_process_cwd) return;
+    try out.appendSlice(pick(folder, env));
+    try out.appendSlice(emojiWidthFix(env));
+    try out.append(' ');
+    try appendDim(out, command.cwd, env.no_color);
+    try out.append('\n');
+}
+
+fn appendCommandTitleWithIndicator(out: *std.array_list.Managed(u8), indicator: []const u8, command: *const CommandText, env: Env) !void {
+    try out.appendSlice(indicator);
+    try out.appendSlice(emojiWidthFix(env));
+    try out.append(' ');
+    try out.appendSlice(command.formatted_command_with_title);
+    try out.appendSlice(RESET_COLOR);
+}
+
+fn appendCommandTitleOnlyWithIndicator(out: *std.array_list.Managed(u8), indicator: []const u8, command: *const CommandText, env: Env) !void {
+    try out.appendSlice(indicator);
+    try out.appendSlice(emojiWidthFix(env));
+    try out.append(' ');
+    try out.appendSlice(command.title_possibly_with_graphic_renditions);
+    try out.appendSlice(RESET_COLOR);
+}
+
 /// The cwd line: empty when it's the process cwd, else a folder icon + path.
 pub fn cwdText(allocator: Allocator, command: *const CommandText, is_process_cwd: bool, env: Env) ![]u8 {
     if (is_process_cwd) return allocator.dupe(u8, "");
     var out: std.array_list.Managed(u8) = .init(allocator);
-    defer out.deinit();
-    try out.appendSlice(pick(folder, env));
-    try out.appendSlice(emojiWidthFix(env));
-    try out.append(' ');
-    const dimmed = try dim(allocator, command.cwd, env.no_color);
-    defer allocator.free(dimmed);
-    try out.appendSlice(dimmed);
-    try out.append('\n');
+    errdefer out.deinit();
+    try appendCwdText(&out, command, is_process_cwd, env);
     return out.toOwnedSlice();
 }
 
 /// `indicator + width-fix + " " + formattedCommandWithTitle + reset`.
 pub fn commandTitleWithIndicator(allocator: Allocator, indicator: []const u8, command: *const CommandText, env: Env) ![]u8 {
     var out: std.array_list.Managed(u8) = .init(allocator);
-    defer out.deinit();
-    try out.appendSlice(indicator);
-    try out.appendSlice(emojiWidthFix(env));
-    try out.append(' ');
-    try out.appendSlice(command.formatted_command_with_title);
-    try out.appendSlice(RESET_COLOR);
+    errdefer out.deinit();
+    try appendCommandTitleWithIndicator(&out, indicator, command, env);
     return out.toOwnedSlice();
 }
 
@@ -191,12 +228,8 @@ pub fn commandTitleWithIndicator(allocator: Allocator, indicator: []const u8, co
 /// command). Used in non-interactive mode and the dashboard.
 pub fn commandTitleOnlyWithIndicator(allocator: Allocator, indicator: []const u8, command: *const CommandText, env: Env) ![]u8 {
     var out: std.array_list.Managed(u8) = .init(allocator);
-    defer out.deinit();
-    try out.appendSlice(indicator);
-    try out.appendSlice(emojiWidthFix(env));
-    try out.append(' ');
-    try out.appendSlice(command.title_possibly_with_graphic_renditions);
-    try out.appendSlice(RESET_COLOR);
+    errdefer out.deinit();
+    try appendCommandTitleOnlyWithIndicator(&out, indicator, command, env);
     return out.toOwnedSlice();
 }
 
@@ -210,32 +243,23 @@ pub fn exitTextAndHistory(allocator: Allocator, command: *const CommandText, exi
     const newline: []const u8 = if (std.mem.trim(u8, last_line_plain, " \t\r\n").len == 0) "" else "\n";
 
     var out: std.array_list.Managed(u8) = .init(allocator);
-    defer out.deinit();
+    errdefer out.deinit();
 
-    const title = try commandTitleOnlyWithIndicator(allocator, pick(exitIndicator(exit_code), env), command, env);
-    defer allocator.free(title);
-    try out.appendSlice(title);
+    try appendCommandTitleOnlyWithIndicator(&out, pick(exitIndicator(exit_code), env), command, env);
     try out.append('\n');
 
-    const cwd = try cwdText(allocator, command, false, env);
-    defer allocator.free(cwd);
-    try out.appendSlice(cwd);
+    try appendCwdText(&out, command, false, env);
     try out.appendSlice(command.history);
     try out.appendSlice(CLEAR_DOWN);
     try out.appendSlice(newline);
 
-    const exit_plain = try std.fmt.allocPrint(allocator, "exit {d}", .{ exit_code });
-    defer allocator.free(exit_plain);
-    const exit_bold = try bold(allocator, exit_plain, env.no_color);
-    defer allocator.free(exit_bold);
-    try out.appendSlice(exit_bold);
+    var num_buf: [64]u8 = undefined;
+    const exit_plain = std.fmt.bufPrint(&num_buf, "exit {d}", .{ exit_code }) catch unreachable;
+    try appendBold(&out, exit_plain, env.no_color);
     try out.append(' ');
 
-    const count_plain = try std.fmt.allocPrint(allocator, "({d}/{d} exited)", .{ num_exited, num_total });
-    defer allocator.free(count_plain);
-    const count_dim = try dim(allocator, count_plain, env.no_color);
-    defer allocator.free(count_dim);
-    try out.appendSlice(count_dim);
+    const count_plain = std.fmt.bufPrint(&num_buf, "({d}/{d} exited)", .{ num_exited, num_total }) catch unreachable;
+    try appendDim(&out, count_plain, env.no_color);
     try out.appendSlice("\n\n");
 
     return out.toOwnedSlice();
@@ -244,14 +268,10 @@ pub fn exitTextAndHistory(allocator: Allocator, command: *const CommandText, exi
 /// The header printed before a command's history: title + cwd.
 pub fn historyStart(allocator: Allocator, indicator: []const u8, command: *const CommandText, is_process_cwd: bool, env: Env) ![]u8 {
     var out: std.array_list.Managed(u8) = .init(allocator);
-    defer out.deinit();
-    const title = try commandTitleWithIndicator(allocator, indicator, command, env);
-    defer allocator.free(title);
-    try out.appendSlice(title);
+    errdefer out.deinit();
+    try appendCommandTitleWithIndicator(&out, indicator, command, env);
     try out.append('\n');
-    const cwd = try cwdText(allocator, command, is_process_cwd, env);
-    defer allocator.free(cwd);
-    try out.appendSlice(cwd);
+    try appendCwdText(&out, command, is_process_cwd, env);
     return out.toOwnedSlice();
 }
 
@@ -259,69 +279,7 @@ pub fn historyStart(allocator: Allocator, indicator: []const u8, command: *const
 // Footer texts (focused command).
 // ---------------------------------------------------------------------------
 
-pub fn waitingText(allocator: Allocator, commands: []const Command, env: Env) ![]u8 {
-    var out: std.array_list.Managed(u8) = .init(allocator);
-    defer out.deinit();
-    try out.appendSlice("\nWaiting for other commands to finish before starting.\n\n");
-    const kill = try shortcut(allocator, KEYS.kill, true, env.no_color);
-    defer allocator.free(kill);
-    try out.appendSlice(kill);
-    try out.append(' ');
-    const label = try killAllLabel(allocator, commands, env.no_color);
-    defer allocator.free(label);
-    try out.appendSlice(label);
-    try out.append('\n');
-    const dash = try shortcut(allocator, KEYS.dashboard, true, env.no_color);
-    defer allocator.free(dash);
-    try out.appendSlice(dash);
-    try out.appendSlice(" dashboard\n");
-    return out.toOwnedSlice();
-}
-
-pub fn runningText(allocator: Allocator, pid: i32, env: Env) ![]u8 {
-    var out: std.array_list.Managed(u8) = .init(allocator);
-    defer out.deinit();
-    try out.append('\n');
-    const kill = try shortcut(allocator, KEYS.kill, true, env.no_color);
-    defer allocator.free(kill);
-    try out.appendSlice(kill);
-    try out.appendSlice(" kill ");
-    const pid_str = try std.fmt.allocPrint(allocator, "(pid {d})", .{ pid });
-    defer allocator.free(pid_str);
-    const pid_text = try dim(allocator, pid_str, env.no_color);
-    defer allocator.free(pid_text);
-    try out.appendSlice(pid_text);
-    try out.append('\n');
-    const dash = try shortcut(allocator, KEYS.dashboard, true, env.no_color);
-    defer allocator.free(dash);
-    try out.appendSlice(dash);
-    try out.appendSlice(" dashboard\n");
-    return out.toOwnedSlice();
-}
-
-pub fn killingText(allocator: Allocator, pid: i32, env: Env) ![]u8 {
-    var out: std.array_list.Managed(u8) = .init(allocator);
-    defer out.deinit();
-    try out.append('\n');
-    const kill = try shortcut(allocator, KEYS.kill, true, env.no_color);
-    defer allocator.free(kill);
-    try out.appendSlice(kill);
-    try out.appendSlice(" kill ");
-    const pid_str = try std.fmt.allocPrint(allocator, "(double-press to force) (pid {d})", .{ pid });
-    defer allocator.free(pid_str);
-    const pid_text = try dim(allocator, pid_str, env.no_color);
-    defer allocator.free(pid_text);
-    try out.appendSlice(pid_text);
-    try out.append('\n');
-    const dash = try shortcut(allocator, KEYS.dashboard, true, env.no_color);
-    defer allocator.free(dash);
-    try out.appendSlice(dash);
-    try out.appendSlice(" dashboard\n");
-    return out.toOwnedSlice();
-}
-
-/// The label for the kill-all shortcut.
-pub fn killAllLabel(allocator: Allocator, commands: []const Command, no_color: bool) ![]u8 {
+fn appendKillAllLabel(out: *std.array_list.Managed(u8), commands: []const Command, no_color: bool) !void {
     var any_killing = false;
     var any_terminal = false;
     for (commands) |c| {
@@ -329,16 +287,66 @@ pub fn killAllLabel(allocator: Allocator, commands: []const Command, no_color: b
         if (c.status == .killing) any_killing = true;
     }
     if (any_killing) {
-        var out: std.array_list.Managed(u8) = .init(allocator);
-        defer out.deinit();
         try out.appendSlice("kill all ");
-        const dimmed = try dim(allocator, "(double-press to force) ", no_color);
-        defer allocator.free(dimmed);
-        try out.appendSlice(dimmed);
-        return out.toOwnedSlice();
+        try appendDim(out, "(double-press to force) ", no_color);
+        return;
     }
-    if (!any_terminal) return allocator.dupe(u8, "exit");
-    return allocator.dupe(u8, "kill all");
+    if (!any_terminal) {
+        try out.appendSlice("exit");
+    } else {
+        try out.appendSlice("kill all");
+    }
+}
+
+pub fn waitingText(allocator: Allocator, commands: []const Command, env: Env) ![]u8 {
+    var out: std.array_list.Managed(u8) = .init(allocator);
+    errdefer out.deinit();
+    try out.appendSlice("\nWaiting for other commands to finish before starting.\n\n");
+    try appendShortcut(&out, KEYS.kill, true, env.no_color);
+    try out.append(' ');
+    try appendKillAllLabel(&out, commands, env.no_color);
+    try out.append('\n');
+    try appendShortcut(&out, KEYS.dashboard, true, env.no_color);
+    try out.appendSlice(" dashboard\n");
+    return out.toOwnedSlice();
+}
+
+pub fn runningText(allocator: Allocator, pid: i32, env: Env) ![]u8 {
+    var out: std.array_list.Managed(u8) = .init(allocator);
+    errdefer out.deinit();
+    try out.append('\n');
+    try appendShortcut(&out, KEYS.kill, true, env.no_color);
+    try out.appendSlice(" kill ");
+    var pid_buf: [32]u8 = undefined;
+    const pid_str = std.fmt.bufPrint(&pid_buf, "(pid {d})", .{ pid }) catch unreachable;
+    try appendDim(&out, pid_str, env.no_color);
+    try out.append('\n');
+    try appendShortcut(&out, KEYS.dashboard, true, env.no_color);
+    try out.appendSlice(" dashboard\n");
+    return out.toOwnedSlice();
+}
+
+pub fn killingText(allocator: Allocator, pid: i32, env: Env) ![]u8 {
+    var out: std.array_list.Managed(u8) = .init(allocator);
+    errdefer out.deinit();
+    try out.append('\n');
+    try appendShortcut(&out, KEYS.kill, true, env.no_color);
+    try out.appendSlice(" kill ");
+    var pid_buf: [64]u8 = undefined;
+    const pid_str = std.fmt.bufPrint(&pid_buf, "(double-press to force) (pid {d})", .{ pid }) catch unreachable;
+    try appendDim(&out, pid_str, env.no_color);
+    try out.append('\n');
+    try appendShortcut(&out, KEYS.dashboard, true, env.no_color);
+    try out.appendSlice(" dashboard\n");
+    return out.toOwnedSlice();
+}
+
+/// The label for the kill-all shortcut.
+pub fn killAllLabel(allocator: Allocator, commands: []const Command, no_color: bool) ![]u8 {
+    var out: std.array_list.Managed(u8) = .init(allocator);
+    errdefer out.deinit();
+    try appendKillAllLabel(&out, commands, no_color);
+    return out.toOwnedSlice();
 }
 
 pub fn exitText(allocator: Allocator, commands: []const Command, command: *const CommandText, status: Status, auto_exit: AutoExit, env: Env) ![]u8 {
@@ -353,38 +361,25 @@ pub fn exitText(allocator: Allocator, commands: []const Command, command: *const
     const is_auto_exit = auto_exit == .auto_exit;
     const indicator = pick(if (was_killed and is_auto_exit) aborted else exitIndicator(exit_code), env);
     var out: std.array_list.Managed(u8) = .init(allocator);
-    defer out.deinit();
+    errdefer out.deinit();
     try out.append('\n');
-    const title = try commandTitleWithIndicator(allocator, indicator, command, env);
-    defer allocator.free(title);
-    try out.appendSlice(title);
+    try appendCommandTitleWithIndicator(&out, indicator, command, env);
     try out.append('\n');
-    const cwd = try cwdText(allocator, command, false, env);
-    defer allocator.free(cwd);
-    try out.appendSlice(cwd);
-    try out.appendSlice("exit ");
-    const exit_str = try std.fmt.allocPrint(allocator, "{d}\n\n", .{ exit_code });
-    defer allocator.free(exit_str);
+    try appendCwdText(&out, command, false, env);
+    var exit_buf: [32]u8 = undefined;
+    const exit_str = std.fmt.bufPrint(&exit_buf, "exit {d}\n\n", .{ exit_code }) catch unreachable;
     try out.appendSlice(exit_str);
     // Restart line: omitted when auto-exit and a clean, non-killed exit.
     const show_restart = !(is_auto_exit and exit_code == 0 and !was_killed);
     if (show_restart) {
-        const enter = try shortcut(allocator, KEYS.enter, true, env.no_color);
-        defer allocator.free(enter);
-        try out.appendSlice(enter);
+        try appendShortcut(&out, KEYS.enter, true, env.no_color);
         try out.appendSlice(" restart\n");
     }
-    const kill = try shortcut(allocator, KEYS.kill, true, env.no_color);
-    defer allocator.free(kill);
-    try out.appendSlice(kill);
+    try appendShortcut(&out, KEYS.kill, true, env.no_color);
     try out.append(' ');
-    const label = try killAllLabel(allocator, commands, env.no_color);
-    defer allocator.free(label);
-    try out.appendSlice(label);
+    try appendKillAllLabel(&out, commands, env.no_color);
     try out.append('\n');
-    const dash = try shortcut(allocator, KEYS.dashboard, true, env.no_color);
-    defer allocator.free(dash);
-    try out.appendSlice(dash);
+    try appendShortcut(&out, KEYS.dashboard, true, env.no_color);
     try out.appendSlice(" dashboard\n");
     return out.toOwnedSlice();
 }
@@ -414,13 +409,11 @@ pub fn summaryOutcome(commands: []const Command) []const u8 {
 
 pub fn drawSummary(allocator: Allocator, commands: []const Command, env: Env) ![]u8 {
     var out: std.array_list.Managed(u8) = .init(allocator);
-    defer out.deinit();
+    errdefer out.deinit();
     const outcome = summaryOutcome(commands);
-    const header_str = try std.fmt.allocPrint(allocator, "Summary – {s}:", .{ outcome });
-    defer allocator.free(header_str);
-    const header = try bold(allocator, header_str, env.no_color);
-    defer allocator.free(header);
-    try out.appendSlice(header);
+    var header_buf: [64]u8 = undefined;
+    const header_str = std.fmt.bufPrint(&header_buf, "Summary – {s}:", .{ outcome }) catch unreachable;
+    try appendBold(&out, header_str, env.no_color);
     try out.append('\n');
     for (commands, 0..) |c, i| {
         if (i > 0) try out.append('\n');
@@ -429,11 +422,9 @@ pub fn drawSummary(allocator: Allocator, commands: []const Command, env: Env) ![
         try out.appendSlice(emojiWidthFix(env));
         try out.append(' ');
         if (st.exit_code) |code| {
-            const exit_plain = try std.fmt.allocPrint(allocator, "exit {d}", .{ code });
-            defer allocator.free(exit_plain);
-            const exit_str = try bold(allocator, exit_plain, env.no_color);
-            defer allocator.free(exit_str);
-            try out.appendSlice(exit_str);
+            var exit_buf: [32]u8 = undefined;
+            const exit_plain = std.fmt.bufPrint(&exit_buf, "exit {d}", .{ code }) catch unreachable;
+            try appendBold(&out, exit_plain, env.no_color);
             try out.append(' ');
         }
         try out.appendSlice(c.title_possibly_with_graphic_renditions);
@@ -511,120 +502,95 @@ pub fn drawDashboardCommandLines(
     };
 
     var lines: std.array_list.Managed(DashboardLine) = .init(allocator);
-    defer lines.deinit();
+    errdefer {
+        for (lines.items) |l| allocator.free(l.line);
+        lines.deinit();
+    }
+
+    var scratch_buf: std.array_list.Managed(u8) = .init(allocator);
+    defer scratch_buf.deinit();
+
+    const sel_index: ?usize = switch (selection) {
+        .keyboard => |k| k.index,
+        .mousedown => |m| m.index,
+        else => null,
+    };
 
     for (commands, 0..) |c, i| {
         const st = statuses.items[i];
         const label = if (c.label) |l| l else " ";
-        const label_sc = try shortcut(allocator, label, false, env.no_color);
-        defer allocator.free(label_sc);
 
-        // Build the icon portion.
-        var icon_buf: std.array_list.Managed(u8) = .init(allocator);
-        defer icon_buf.deinit();
+        scratch_buf.clearRetainingCapacity();
+        try appendShortcut(&scratch_buf, label, false, env.no_color);
+        const start_length = ansi.visibleLen(scratch_buf.items) + separator.len + icon_width;
+
+        const start = try ansi.truncate(allocator, scratch_buf.items, width);
+        defer allocator.free(start);
+
+        var line_buf: std.array_list.Managed(u8) = .init(allocator);
+        errdefer line_buf.deinit();
+        try line_buf.appendSlice(start);
+
+        // Append the icon portion directly into line_buf.
         const is_selected_indicator = if (selected_indicator) |si| std.mem.eql(u8, st.indicator, si) else false;
         if (is_selected_indicator) {
             if (env.no_color) {
-                try icon_buf.appendSlice(separator[0..1]);
-                try icon_buf.appendSlice("→");
-                try icon_buf.appendSlice(st.indicator);
+                try line_buf.appendSlice(separator[0..1]);
+                try line_buf.appendSlice("→");
+                try line_buf.appendSlice(st.indicator);
             } else {
-                try icon_buf.appendSlice(separator[0..1]);
-                var padded: std.array_list.Managed(u8) = .init(allocator);
-                defer padded.deinit();
-                try padded.append(' ');
-                try padded.appendSlice(st.indicator);
-                for (0..icon_width) |_| try padded.append(' ');
-                const padded_slice = try padded.toOwnedSlice();
-                const inv = try invert(allocator, padded_slice, env.no_color);
-                allocator.free(padded_slice);
-                try icon_buf.appendSlice(inv);
-                allocator.free(inv);
+                try line_buf.appendSlice(separator[0..1]);
+                try line_buf.appendSlice("\x1B[7m ");
+                try line_buf.appendSlice(st.indicator);
+                try line_buf.appendNTimes(' ', icon_width);
+                try line_buf.appendSlice(RESET_COLOR);
             }
         } else {
-            try icon_buf.appendSlice(separator);
-            try icon_buf.appendSlice(st.indicator);
+            try line_buf.appendSlice(separator);
+            try line_buf.appendSlice(st.indicator);
         }
-        const icon_str = try icon_buf.toOwnedSlice();
-        defer allocator.free(icon_str);
 
-        const start = try ansi.truncate(allocator, label_sc, width);
-        defer allocator.free(start);
-        const start_combined = try std.mem.concat(allocator, u8, &.{ start, icon_str });
-        defer allocator.free(start_combined);
-
-        const start_length = removeGraphicRenditionsLen(label_sc) + separator.len + icon_width;
-
-        // Build the end portion.
-        var end_buf: std.array_list.Managed(u8) = .init(allocator);
-        defer end_buf.deinit();
+        // Build the end portion in scratch_buf.
+        scratch_buf.clearRetainingCapacity();
         if (st.exit_code) |code| {
             var status_buf: [16]u8 = undefined;
             const status_str = std.fmt.bufPrint(&status_buf, "exit {d}", .{ code }) catch "exit 99999";
-            try end_buf.appendSlice(status_str);
-            for (0..(widest_status - status_str.len)) |_| try end_buf.append(' ');
-            try end_buf.appendSlice(separator);
+            try scratch_buf.appendSlice(status_str);
+            try scratch_buf.appendNTimes(' ', widest_status - status_str.len);
+            try scratch_buf.appendSlice(separator);
         }
-        try end_buf.appendSlice(c.title_possibly_with_graphic_renditions);
-        const end_str = try end_buf.toOwnedSlice();
-        defer allocator.free(end_str);
+        try scratch_buf.appendSlice(c.title_possibly_with_graphic_renditions);
 
         const end_width: usize = if (width > start_length + separator.len) width - start_length - separator.len else 0;
-        const truncated_end = try ansi.truncate(allocator, end_str, end_width);
+        const truncated_end = try ansi.truncate(allocator, scratch_buf.items, end_width);
         defer allocator.free(truncated_end);
 
-        const length = start_length + separator.len + removeGraphicRenditionsLen(truncated_end);
+        const length = start_length + separator.len + ansi.visibleLen(truncated_end);
 
-        // Highlighted separator.
-        var sep_buf: std.array_list.Managed(u8) = .init(allocator);
-        defer sep_buf.deinit();
-        if (is_selected_indicator and !env.no_color) {
-            const inv_space = try invert(allocator, " ", env.no_color);
-            defer allocator.free(inv_space);
-            try sep_buf.appendSlice(inv_space);
-            try sep_buf.appendSlice(separator[1..]);
-        } else {
-            try sep_buf.appendSlice(separator);
-        }
-        const sep_str = try sep_buf.toOwnedSlice();
-        defer allocator.free(sep_str);
-
-        // Final end with highlight.
-        var final_end_buf: std.array_list.Managed(u8) = .init(allocator);
-        defer final_end_buf.deinit();
-        const sel_index: ?usize = switch (selection) {
-            .keyboard => |k| k.index,
-            .mousedown => |m| m.index,
-            else => null,
-        };
-        const is_selected = sel_index != null and sel_index.? == i;
-        if (is_selected) {
-            if (env.no_color) {
-                try final_end_buf.appendSlice(sep_str[0..1]);
-                try final_end_buf.appendSlice("→");
-                try final_end_buf.appendSlice(truncated_end);
-            } else {
-                try final_end_buf.appendSlice(sep_str);
-                const inv_end = try invert(allocator, truncated_end, env.no_color);
-                defer allocator.free(inv_end);
-                try final_end_buf.appendSlice(inv_end);
-            }
-        } else {
-            try final_end_buf.appendSlice(sep_str);
-            try final_end_buf.appendSlice(truncated_end);
-        }
-        const final_end = try final_end_buf.toOwnedSlice();
-        defer allocator.free(final_end);
-
-        // Assemble the line.
-        var line_buf: std.array_list.Managed(u8) = .init(allocator);
-        defer line_buf.deinit();
         var cha_buf: [16]u8 = undefined;
-        try line_buf.appendSlice(start_combined);
         try line_buf.appendSlice(RESET_COLOR);
         try line_buf.appendSlice(cursorHorizontalAbsolute(&cha_buf, start_length + 1));
         try line_buf.appendSlice(CLEAR_RIGHT);
-        try line_buf.appendSlice(final_end);
+
+        // Append separator + highlighted end directly into line_buf.
+        const is_selected = sel_index != null and sel_index.? == i;
+        if (is_selected and env.no_color) {
+            try line_buf.appendSlice(separator[0..1]);
+            try line_buf.appendSlice("→");
+            try line_buf.appendSlice(truncated_end);
+        } else {
+            if (is_selected_indicator and !env.no_color) {
+                try appendInvert(&line_buf, " ", false);
+                try line_buf.appendSlice(separator[1..]);
+            } else {
+                try line_buf.appendSlice(separator);
+            }
+            if (is_selected) {
+                try appendInvert(&line_buf, truncated_end, env.no_color);
+            } else {
+                try line_buf.appendSlice(truncated_end);
+            }
+        }
         try line_buf.appendSlice(RESET_COLOR);
 
         try lines.append(.{ .line = try line_buf.toOwnedSlice(), .length = length });
@@ -652,56 +618,64 @@ pub fn drawDashboard(
         allocator.free(lines);
     }
 
-    var final_lines: std.array_list.Managed(u8) = .init(allocator);
-    defer final_lines.deinit();
+    var out: std.array_list.Managed(u8) = .init(allocator);
+    errdefer out.deinit();
+    if (!done) {
+        try out.append('\n');
+    }
     for (lines, 0..) |l, i| {
-        if (i > 0) try final_lines.append('\n');
-        try final_lines.appendSlice(l.line);
+        if (i > 0) try out.append('\n');
+        try out.appendSlice(l.line);
     }
 
     if (done) {
-        try final_lines.append('\n');
-        return final_lines.toOwnedSlice();
+        try out.append('\n');
+        return out.toOwnedSlice();
     }
 
-    const label = labels.summarizeLabels(allocator, commands.len) catch return final_lines.toOwnedSlice();
+    try out.appendSlice("\n\n");
+
+    const label = try labels.summarizeLabels(allocator, commands.len);
     defer allocator.free(label);
 
+    try appendShortcut(&out, label, false, env.no_color);
+    try out.appendSlice(" focus command ");
+    try appendDim(&out, "(or click)", env.no_color);
+    try out.append('\n');
+
+    try appendShortcut(&out, KEYS.kill, false, env.no_color);
+    try out.append(' ');
+    try appendKillAllLabel(&out, commands, env.no_color);
+    try out.append('\n');
+
+    const nav_keys = if (auto_exit == .auto_exit) KEYS.navigate_vertically_only else KEYS.navigate;
+    try appendShortcut(&out, nav_keys, false, env.no_color);
+    try out.appendSlice(" move selection\n");
+
     // Enter line.
-    var enter_buf: std.array_list.Managed(u8) = .init(allocator);
-    defer enter_buf.deinit();
     switch (selection) {
         .keyboard => |kb| {
-            const enter_sc = try shortcut(allocator, KEYS.enter, false, env.no_color);
-            defer allocator.free(enter_sc);
-            try enter_buf.appendSlice(enter_sc);
-            try enter_buf.appendSlice(" focus selected");
-            const pid = command_mod.getPid(&commands[kb.index]);
-            if (pid) |p| {
-                const pid_str = try std.fmt.allocPrint(allocator, " (pid {d})", .{ p });
-                defer allocator.free(pid_str);
-                try enter_buf.appendSlice(pid_str);
+            try appendShortcut(&out, KEYS.enter, false, env.no_color);
+            try out.appendSlice(" focus selected");
+            if (command_mod.getPid(&commands[kb.index])) |p| {
+                var pid_buf: [32]u8 = undefined;
+                const pid_str = std.fmt.bufPrint(&pid_buf, " (pid {d})", .{ p }) catch unreachable;
+                try out.appendSlice(pid_str);
             }
-            try enter_buf.append('\n');
-            const unsel_sc = try shortcut(allocator, KEYS.unselect, false, env.no_color);
-            defer allocator.free(unsel_sc);
-            try enter_buf.appendSlice(unsel_sc);
-            try enter_buf.appendSlice(" unselect");
+            try out.append('\n');
+            try appendShortcut(&out, KEYS.unselect, false, env.no_color);
+            try out.appendSlice(" unselect\n");
         },
         .by_indicator => |bi| {
-            const enter_sc = try shortcut(allocator, KEYS.enter, false, env.no_color);
-            defer allocator.free(enter_sc);
-            try enter_buf.appendSlice(enter_sc);
+            try appendShortcut(&out, KEYS.enter, false, env.no_color);
             var any_killing = false;
             for (commands) |*c| {
                 if (std.mem.eql(u8, getIndicatorChoice(c, env), bi.indicator) and c.status == .killing) any_killing = true;
             }
-            if (any_killing) try enter_buf.appendSlice(" force ");
-            try enter_buf.appendSlice("restart selected\n");
-            const unsel_sc = try shortcut(allocator, KEYS.unselect, false, env.no_color);
-            defer allocator.free(unsel_sc);
-            try enter_buf.appendSlice(unsel_sc);
-            try enter_buf.appendSlice(" unselect");
+            if (any_killing) try out.appendSlice(" force ");
+            try out.appendSlice("restart selected\n");
+            try appendShortcut(&out, KEYS.unselect, false, env.no_color);
+            try out.appendSlice(" unselect\n");
         },
         else => {
             const has_failed = for (commands) |c| {
@@ -717,97 +691,32 @@ pub fn drawDashboard(
             } else false;
             if (auto_exit == .auto_exit) {
                 if (has_failed) {
-                    const enter_sc = try shortcut(allocator, KEYS.enter, false, env.no_color);
-                    defer allocator.free(enter_sc);
-                    try enter_buf.appendSlice(enter_sc);
-                    try enter_buf.appendSlice(" restart failed");
+                    try appendShortcut(&out, KEYS.enter, false, env.no_color);
+                    try out.appendSlice(" restart failed\n");
                 }
             } else if (has_exited) {
-                const enter_sc = try shortcut(allocator, KEYS.enter, false, env.no_color);
-                defer allocator.free(enter_sc);
-                try enter_buf.appendSlice(enter_sc);
-                try enter_buf.appendSlice(" restart exited");
+                try appendShortcut(&out, KEYS.enter, false, env.no_color);
+                try out.appendSlice(" restart exited\n");
             }
         },
-    }
-    const enter_str = try enter_buf.toOwnedSlice();
-    defer allocator.free(enter_str);
-
-    const nav_keys = if (auto_exit == .auto_exit) KEYS.navigate_vertically_only else KEYS.navigate;
-
-    var out: std.array_list.Managed(u8) = .init(allocator);
-    defer out.deinit();
-    try out.append('\n');
-    try out.appendSlice(final_lines.items);
-    try out.appendSlice("\n\n");
-
-    const label_sc = try shortcut(allocator, label, false, env.no_color);
-    defer allocator.free(label_sc);
-    try out.appendSlice(label_sc);
-    try out.appendSlice(" focus command ");
-    const or_click = try dim(allocator, "(or click)", env.no_color);
-    defer allocator.free(or_click);
-    try out.appendSlice(or_click);
-    try out.append('\n');
-
-    const kill_sc = try shortcut(allocator, KEYS.kill, false, env.no_color);
-    defer allocator.free(kill_sc);
-    try out.appendSlice(kill_sc);
-    try out.append(' ');
-    const kill_label = try killAllLabel(allocator, commands, env.no_color);
-    defer allocator.free(kill_label);
-    try out.appendSlice(kill_label);
-    try out.append('\n');
-
-    const nav_sc = try shortcut(allocator, nav_keys, false, env.no_color);
-    defer allocator.free(nav_sc);
-    try out.appendSlice(nav_sc);
-    try out.appendSlice(" move selection\n");
-
-    if (enter_str.len > 0) {
-        try out.appendSlice(enter_str);
-        try out.append('\n');
     }
 
     switch (auto_exit) {
         .auto_exit => |max_parallel| {
-            const session_ends = "The session ends automatically once all commands are ";
-            try out.appendSlice(session_ends);
+            try out.appendSlice("The session ends automatically once all commands are ");
             try out.appendSlice(pick(exitIndicator(0), env));
             try out.appendSlice(emojiWidthFix(env));
             try out.appendSlice(" ");
-            const exit0 = try bold(allocator, "exit 0", env.no_color);
-            defer allocator.free(exit0);
-            try out.appendSlice(exit0);
+            try appendBold(&out, "exit 0", env.no_color);
             try out.appendSlice(".\n");
-            const max_str = try std.fmt.allocPrint(allocator, "At most {d} {s} at a time.", .{ max_parallel, if (max_parallel == 1) "command runs" else "commands run" });
-            defer allocator.free(max_str);
+            var max_buf: [64]u8 = undefined;
+            const max_str = std.fmt.bufPrint(&max_buf, "At most {d} {s} at a time.\n", .{ max_parallel, if (max_parallel == 1) "command runs" else "commands run" }) catch unreachable;
             try out.appendSlice(max_str);
-            try out.append('\n');
         },
         else => {},
     }
 
     return out.toOwnedSlice();
-}
-
-/// Display length of a string after removing SGR (color/style) escape sequences.
-fn removeGraphicRenditionsLen(s: []const u8) usize {
-    var i: usize = 0;
-    var len: usize = 0;
-    while (i < s.len) {
-        if (s[i] == 0x1B and i + 1 < s.len and s[i + 1] == '[') {
-            var j = i + 2;
-            while (j < s.len and ((s[j] >= '0' and s[j] <= '9') or s[j] == ';')) j += 1;
-            if (j < s.len and s[j] == 'm') {
-                i = j + 1;
-                continue;
-            }
-        }
-        len += 1;
-        i += 1;
-    }
-    return len;
 }
 
 // ---------------------------------------------------------------------------

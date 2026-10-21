@@ -12,15 +12,10 @@ const scanners = @import("scanners.zig");
 const ansi = @import("ansi.zig");
 const regex = @import("regex.zig");
 
-/// Convert a `?StatusTuple` to a `?StatusValue` (`[2][]const u8`).
-fn toStatusValue(status: ?StatusTuple) ?StatusValue {
-    return if (status) |s| .{ s.primary, s.degraded } else null;
-}
-
 fn statusValueEql(a: ?StatusValue, b: ?StatusValue) bool {
     if (a == null and b == null) return true;
     if (a == null or b == null) return false;
-    return std.mem.eql(u8, a.?[0], b.?[0]) and std.mem.eql(u8, a.?[1], b.?[1]);
+    return std.mem.eql(u8, a.?.primary, b.?.primary) and std.mem.eql(u8, a.?.degraded, b.?.degraded);
 }
 
 /// Milliseconds between two kill presses before the second is treated as a
@@ -88,6 +83,7 @@ pub const CommandText = struct {
 
 /// A command to run, with its lifecycle state and the data the renderer needs.
 pub const Command = struct {
+    allocator: std.mem.Allocator,
     label: ?[]const u8,
     file: []const u8,
     args: []const []const u8,
@@ -106,6 +102,22 @@ pub const Command = struct {
     history_alternate_screen: []const u8,
     pty: ?Pty,
 
+    /// Free heap-allocated history buffers and close the PTY if still open.
+    pub fn deinit(self: *Command) void {
+        if (self.history.len > 0) {
+            self.allocator.free(self.history);
+            self.history = "";
+        }
+        if (self.history_alternate_screen.len > 0) {
+            self.allocator.free(self.history_alternate_screen);
+            self.history_alternate_screen = "";
+        }
+        if (self.pty) |*p| {
+            p.deinit();
+            self.pty = null;
+        }
+    }
+
     /// Project this command down to its rendering-relevant fields.
     pub fn text(self: *const Command) CommandText {
         return .{
@@ -121,6 +133,7 @@ pub const Command = struct {
     /// meaningful; the rest are empty defaults.
     pub fn forTest(status: Status, label: ?[]const u8) Command {
         return .{
+            .allocator = std.testing.allocator,
             .label = label,
             .file = "",
             .args = &.{},
@@ -143,6 +156,8 @@ pub const Command = struct {
 
     /// Spawn the command in a new PTY and transition to the `running` state.
     pub fn start(self: *Command, cols: u16, rows: u16) Pty.Error!void {
+        if (self.history.len > 0) self.allocator.free(self.history);
+        if (self.history_alternate_screen.len > 0) self.allocator.free(self.history_alternate_screen);
         self.history = "";
         self.history_alternate_screen = "";
         self.is_simple_log = true;
@@ -185,13 +200,13 @@ pub const Command = struct {
     /// `RegExp(key, "u").test(line)`). A matching rule sets
     /// `status_from_rules`; a rule with a `null` status resets it.
     pub fn updateStatusFromRules(self: *Command, data: []const u8) void {
-        const stripped = ansi.removeGraphicRenditions(std.heap.page_allocator, data) catch return;
-        defer std.heap.page_allocator.free(stripped);
+        const stripped = ansi.removeGraphicRenditions(self.allocator, data) catch return;
+        defer self.allocator.free(stripped);
         for (self.status_rules) |rule| {
-            var re = regex.Regex.compile(rule.pattern) catch continue;
+            var re = regex.Regex.compile(self.allocator, rule.pattern) catch continue;
             defer re.deinit();
             if (re.matches(stripped)) {
-                self.status_from_rules = toStatusValue(rule.status);
+                self.status_from_rules = rule.status;
             }
         }
     }
@@ -201,8 +216,8 @@ pub const Command = struct {
     /// when `status_from_rules` changed.
     pub fn pushHistory(self: *Command, data: []const u8) bool {
         const previous = self.status_from_rules;
-        const parts = scanners.splitAlternateScreen(data, std.heap.page_allocator) catch return false;
-        defer std.heap.page_allocator.free(parts);
+        const parts = scanners.splitAlternateScreen(data, self.allocator) catch return false;
+        defer self.allocator.free(parts);
 
         for (parts) |part| {
             switch (part) {
@@ -212,15 +227,17 @@ pub const Command = struct {
                     self.updateStatusFromRules(chunk);
                     if (scanners.matchesClear(chunk)) {
                         self.is_simple_log = true;
+                        if (self.history.len > 0) self.allocator.free(self.history);
+                        if (self.history_alternate_screen.len > 0) self.allocator.free(self.history_alternate_screen);
                         self.history = "";
                         self.history_alternate_screen = "";
                     } else if (!self.is_on_alternate_screen and scanners.isNotSimpleLog(chunk)) {
                         self.is_simple_log = false;
                     }
                     if (self.is_on_alternate_screen) {
-                        self.history_alternate_screen = appendCapped(self.history_alternate_screen, chunk, maxHistory());
+                        self.history_alternate_screen = appendCapped(self.allocator, self.history_alternate_screen, chunk, maxHistory()) catch self.history_alternate_screen;
                     } else {
-                        self.history = appendCapped(self.history, chunk, maxHistory());
+                        self.history = appendCapped(self.allocator, self.history, chunk, maxHistory()) catch self.history;
                     }
                 },
             }
@@ -229,20 +246,21 @@ pub const Command = struct {
     }
 
     /// The full history (for re-display when switching back to a command).
-    pub fn joinHistory(self: *const Command) []const u8 {
+    /// Always returns an owned slice allocated with `allocator`.
+    pub fn joinHistory(self: *const Command, allocator: std.mem.Allocator) ![]u8 {
         if (self.history_alternate_screen.len == 0) {
             if (self.is_on_alternate_screen) {
-                return std.mem.concat(std.heap.page_allocator, u8, &.{ self.history, ansi.ENABLE_ALTERNATE_SCREEN }) catch self.history;
+                return std.mem.concat(allocator, u8, &.{ self.history, ansi.ENABLE_ALTERNATE_SCREEN });
             }
-            return self.history;
+            return allocator.dupe(u8, self.history);
         }
         const suffix = if (self.is_on_alternate_screen) "" else ansi.DISABLE_ALTERNATE_SCREEN;
-        return std.mem.concat(std.heap.page_allocator, u8, &.{
+        return std.mem.concat(allocator, u8, &.{
             self.history,
             ansi.ENABLE_ALTERNATE_SCREEN,
             self.history_alternate_screen,
             suffix,
-        }) catch self.history;
+        });
     }
 
     /// Record that the child has exited with `exit_code`. If the command was in
@@ -311,12 +329,8 @@ pub fn isDone(commands: []const Command, attempted_kill_all: bool, auto_exit: Au
 
 /// The last line of a string (after the final `\n` or `\r`).
 pub fn getLastLine(s: []const u8) []const u8 {
-    var index: i64 = @as(i64, @intCast(s.len)) - 1;
-    while (index >= 0) {
-        if (s[@intCast(index)] == '\n' or s[@intCast(index)] == '\r') break;
-        index -= 1;
-    }
-    return s[@intCast(index + 1)..];
+    const idx = std.mem.lastIndexOfAny(u8, s, "\r\n") orelse return s;
+    return s[idx + 1 ..];
 }
 
 /// The PID of a running/killing command, or null if not running.
@@ -344,15 +358,15 @@ fn maxHistory() usize {
 /// Append `chunk` to `existing`, capping the result at `max` bytes (keeping
 /// the most recent data). Frees the old `existing` slice if it was heap-allocated
 /// (i.e. non-empty). Returns an owned slice.
-fn appendCapped(existing: []const u8, chunk: []const u8, max: usize) []const u8 {
+fn appendCapped(allocator: std.mem.Allocator, existing: []const u8, chunk: []const u8, max: usize) ![]const u8 {
     const total = existing.len + chunk.len;
     const out = if (total <= max) blk: {
-        const o = std.heap.page_allocator.alloc(u8, total) catch return existing;
+        const o = try allocator.alloc(u8, total);
         std.mem.copyForwards(u8, o, existing);
         std.mem.copyForwards(u8, o[existing.len..], chunk);
         break :blk o;
     } else blk: {
-        const o = std.heap.page_allocator.alloc(u8, max) catch return existing;
+        const o = try allocator.alloc(u8, max);
         // We want the last `max` bytes of (existing + chunk).
         // The start position in the concatenation is (total - max).
         const start_in_concat = total - max;
@@ -370,7 +384,7 @@ fn appendCapped(existing: []const u8, chunk: []const u8, max: usize) []const u8 
     };
     // Free the old slice if it was heap-allocated (non-empty means it was
     // produced by a previous appendCapped call, not the initial "" literal).
-    if (existing.len > 0) std.heap.page_allocator.free(existing);
+    if (existing.len > 0) allocator.free(existing);
     return out;
 }
 
@@ -464,7 +478,7 @@ test "updateStatusFromRules sets status_from_rules on a match" {
     // A match sets the status.
     cmd.updateStatusFromRules("now Building the thing");
     try std.testing.expect(cmd.status_from_rules != null);
-    try std.testing.expectEqualStrings("🔨", cmd.status_from_rules.?[0]);
+    try std.testing.expectEqualStrings("🔨", cmd.status_from_rules.?.primary);
 
     // A later rule with a null status resets it.
     cmd.updateStatusFromRules("all Done");
@@ -473,6 +487,7 @@ test "updateStatusFromRules sets status_from_rules on a match" {
 
 test "pushHistory toggles alternate screen and simple-log flags" {
     var cmd = Command.forTest(runningStatus(1), null);
+    defer cmd.deinit();
     try std.testing.expect(cmd.is_simple_log);
     try std.testing.expect(!cmd.is_on_alternate_screen);
 
@@ -483,11 +498,13 @@ test "pushHistory toggles alternate screen and simple-log flags" {
 
     // A cursor move on the main screen makes the log non-simple.
     var cmd2 = Command.forTest(runningStatus(1), null);
+    defer cmd2.deinit();
     _ = cmd2.pushHistory("line one\n\x1B[2Aline three");
     try std.testing.expect(!cmd2.is_simple_log);
 
     // A clear resets the simple-log flag.
     var cmd3 = Command.forTest(runningStatus(1), null);
+    defer cmd3.deinit();
     cmd3.is_simple_log = false;
     _ = cmd3.pushHistory("\x1B[2J");
     try std.testing.expect(cmd3.is_simple_log);
@@ -502,8 +519,8 @@ test "kill double-press state transitions" {
         if (cmd.pty) |*p| {
             p.kill(.KILL);
             _ = p.wait();
-            p.deinit();
         }
+        cmd.deinit();
     }
 
     try cmd.start(80, 24);
@@ -523,45 +540,48 @@ test "kill double-press state transitions" {
 }
 
 test "appendCapped: empty existing, small chunk" {
-    const result = appendCapped("", "hello", 100);
-    defer std.heap.page_allocator.free(result);
+    const allocator = std.testing.allocator;
+    const result = try appendCapped(allocator, "", "hello", 100);
+    defer allocator.free(result);
     try std.testing.expectEqualStrings("hello", result);
 }
 
 test "appendCapped: empty existing, chunk larger than max" {
-    const result = appendCapped("", "abcdefghij", 5);
-    defer std.heap.page_allocator.free(result);
+    const allocator = std.testing.allocator;
+    const result = try appendCapped(allocator, "", "abcdefghij", 5);
+    defer allocator.free(result);
     try std.testing.expectEqualStrings("fghij", result);
 }
 
 test "appendCapped: existing + chunk fits in max" {
-    const existing = std.heap.page_allocator.alloc(u8, 3) catch unreachable;
-    std.mem.copyForwards(u8, existing, "abc");
-    const result = appendCapped(existing, "def", 10);
-    defer std.heap.page_allocator.free(result);
+    const allocator = std.testing.allocator;
+    const existing = try allocator.dupe(u8, "abc");
+    const result = try appendCapped(allocator, existing, "def", 10);
+    defer allocator.free(result);
     try std.testing.expectEqualStrings("abcdef", result);
 }
 
 test "appendCapped: existing + chunk exceeds max (tail of existing + all chunk)" {
-    const existing = std.heap.page_allocator.alloc(u8, 5) catch unreachable;
-    std.mem.copyForwards(u8, existing, "abcde");
-    const result = appendCapped(existing, "fghij", 7);
-    defer std.heap.page_allocator.free(result);
+    const allocator = std.testing.allocator;
+    const existing = try allocator.dupe(u8, "abcde");
+    const result = try appendCapped(allocator, existing, "fghij", 7);
+    defer allocator.free(result);
     // Keep last 7 of "abcdefghij" = "cdefghij"[1..] = "defghij"
     try std.testing.expectEqualStrings("defghij", result);
 }
 
 test "appendCapped: chunk alone exceeds max (keep tail of chunk)" {
-    const existing = std.heap.page_allocator.alloc(u8, 2) catch unreachable;
-    std.mem.copyForwards(u8, existing, "ab");
-    const result = appendCapped(existing, "cdefghijklmnop", 5);
-    defer std.heap.page_allocator.free(result);
+    const allocator = std.testing.allocator;
+    const existing = try allocator.dupe(u8, "ab");
+    const result = try appendCapped(allocator, existing, "cdefghijklmnop", 5);
+    defer allocator.free(result);
     // total = 14, start_in_concat = 9, offset_in_chunk = 7, chunk[7..] = "lmnop"
     try std.testing.expectEqualStrings("lmnop", result);
 }
 
 test "pushHistory: text goes to history" {
     var cmd = Command.forTest(runningStatus(1), null);
+    defer cmd.deinit();
     _ = cmd.pushHistory("hello world\n");
     try std.testing.expectEqualStrings("hello world\n", cmd.history);
     try std.testing.expectEqualStrings("", cmd.history_alternate_screen);
@@ -569,6 +589,7 @@ test "pushHistory: text goes to history" {
 
 test "pushHistory: alternate screen text goes to history_alternate_screen" {
     var cmd = Command.forTest(runningStatus(1), null);
+    defer cmd.deinit();
     _ = cmd.pushHistory("before\x1B[?1049halt screen text\x1B[?1049lafter");
     try std.testing.expectEqualStrings("beforeafter", cmd.history);
     try std.testing.expectEqualStrings("alt screen text", cmd.history_alternate_screen);
@@ -576,14 +597,31 @@ test "pushHistory: alternate screen text goes to history_alternate_screen" {
 
 test "pushHistory: clear resets history" {
     var cmd = Command.forTest(runningStatus(1), null);
+    defer cmd.deinit();
     _ = cmd.pushHistory("old output\n");
     _ = cmd.pushHistory("\x1B[2Jnew output\n");
     // After clear, history is reset and the chunk (including the clear seq) is appended.
     try std.testing.expectEqualStrings("\x1B[2Jnew output\n", cmd.history);
 }
 
+test "joinHistory returns owned slice in all modes" {
+    const allocator = std.testing.allocator;
+    var cmd = Command.forTest(runningStatus(1), null);
+    defer cmd.deinit();
+
+    const empty_joined = try cmd.joinHistory(allocator);
+    defer allocator.free(empty_joined);
+    try std.testing.expectEqualStrings("", empty_joined);
+
+    _ = cmd.pushHistory("main\n\x1B[?1049halt\x1B[?1049l");
+    const joined = try cmd.joinHistory(allocator);
+    defer allocator.free(joined);
+    try std.testing.expectEqualStrings("main\n\x1B[?1049halt\x1B[?1049l", joined);
+}
+
 test "pushHistory: status rule change returns true" {
     var cmd = Command.forTest(runningStatus(1), null);
+    defer cmd.deinit();
     cmd.status_rules = &.{
         .{ .pattern = "Building", .status = .{ .primary = "🔨", .degraded = "B" } },
         .{ .pattern = "Done", .status = null },
@@ -607,7 +645,7 @@ test "updateStatusFromRules: ANSI-embedded pattern" {
     // The pattern "Building" is embedded in ANSI codes; after stripping, it matches.
     cmd.updateStatusFromRules("\x1B[32mBuilding\x1B[m the thing");
     try std.testing.expect(cmd.status_from_rules != null);
-    try std.testing.expectEqualStrings("🔨", cmd.status_from_rules.?[0]);
+    try std.testing.expectEqualStrings("🔨", cmd.status_from_rules.?.primary);
 }
 
 test "updateStatusFromRules: last match wins" {
@@ -619,5 +657,5 @@ test "updateStatusFromRules: last match wins" {
     // Both patterns in the same chunk: last rule wins.
     cmd.updateStatusFromRules("Building then Testing");
     try std.testing.expect(cmd.status_from_rules != null);
-    try std.testing.expectEqualStrings("🧪", cmd.status_from_rules.?[0]);
+    try std.testing.expectEqualStrings("🧪", cmd.status_from_rules.?.primary);
 }

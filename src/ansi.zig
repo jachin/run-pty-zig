@@ -28,27 +28,38 @@ pub const RESTORE_CURSOR = "\x1B[u";
 // SGR (Select Graphic Rendition) handling.
 // ---------------------------------------------------------------------------
 
-fn isDigit(c: u8) bool {
-    return c >= '0' and c <= '9';
-}
-
 /// If `s[i..]` begins an SGR sequence (`ESC [ params m`), return the index just
 /// past it; otherwise return null. The parameter part is optional and matches
 /// `\d+(?:;\d+)*`, mirroring the original `GRAPHIC_RENDITIONS` regex.
 fn findSgrEnd(s: []const u8, i: usize) ?usize {
     if (i + 1 >= s.len or s[i] != 0x1B or s[i + 1] != '[') return null;
     var j = i + 2;
-    if (j < s.len and isDigit(s[j])) {
-        while (j < s.len and isDigit(s[j])) j += 1;
+    if (j < s.len and std.ascii.isDigit(s[j])) {
+        while (j < s.len and std.ascii.isDigit(s[j])) j += 1;
         while (j < s.len and s[j] == ';') {
             j += 1;
-            if (j < s.len and isDigit(s[j])) {
-                while (j < s.len and isDigit(s[j])) j += 1;
+            if (j < s.len and std.ascii.isDigit(s[j])) {
+                while (j < s.len and std.ascii.isDigit(s[j])) j += 1;
             } else break;
         }
     }
     if (j < s.len and s[j] == 'm') return j + 1;
     return null;
+}
+
+/// Display length of `s` after ignoring SGR (color/style) escape sequences.
+pub fn visibleLen(s: []const u8) usize {
+    var visible: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        if (findSgrEnd(s, i)) |end| {
+            i = end;
+        } else {
+            visible += 1;
+            i += 1;
+        }
+    }
+    return visible;
 }
 
 /// Remove all SGR (color/style) escape sequences from `s`, keeping the text.
@@ -75,23 +86,14 @@ pub fn removeGraphicRenditions(allocator: Allocator, s: []const u8) ![]u8 {
 /// a newly-allocated slice owned by `allocator`.
 pub fn truncate(allocator: Allocator, s: []const u8, max_length: usize) ![]u8 {
     // Count visible characters (everything that is not part of an SGR code).
-    var visible: usize = 0;
-    var i: usize = 0;
-    while (i < s.len) {
-        if (findSgrEnd(s, i)) |end| {
-            i = end;
-        } else {
-            visible += 1;
-            i += 1;
-        }
-    }
+    const visible = visibleLen(s);
     if (visible <= max_length) return allocator.dupe(u8, s);
     if (max_length == 0) return allocator.dupe(u8, "…");
 
     var out: std.array_list.Managed(u8) = .init(allocator);
     defer out.deinit();
     var length: usize = 0;
-    i = 0;
+    var i: usize = 0;
     while (i < s.len) {
         if (findSgrEnd(s, i)) |end| {
             try out.appendSlice(s[i..end]);

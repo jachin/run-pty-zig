@@ -3,7 +3,6 @@
 //! Detects the terminal type from environment variables and provides
 //! capability flags that the renderer can use to adapt its output.
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 
 /// Color capability level.
 pub const ColorLevel = enum {
@@ -43,8 +42,7 @@ pub const Capabilities = struct {
     no_color: bool,
 
     /// Detect capabilities from the current environment.
-    pub fn detect(allocator: Allocator) !Capabilities {
-        _ = allocator;
+    pub fn detect() Capabilities {
         const term = std.c.getenv("TERM") orelse "unknown";
         const term_slice = std.mem.sliceTo(term, 0);
         const term_program = std.c.getenv("TERM_PROGRAM");
@@ -141,69 +139,7 @@ pub const Profile = struct {
     pub fn useBracketedPaste(self: Profile) bool {
         return self.caps.bracketed_paste;
     }
-
-    /// The best color sequence for a foreground color.
-    pub fn fgColor(self: Profile, r: u8, g: u8, b: u8) []const u8 {
-        return switch (self.caps.color) {
-            .none => "",
-            .basic => basicFg(r, g, b),
-            .twenty_five_six => twentyFiveSixFg(r, g, b),
-            .truecolor => truecolorFg(r, g, b),
-        };
-    }
-
-    /// The best color sequence for a background color.
-    pub fn bgColor(self: Profile, r: u8, g: u8, b: u8) []const u8 {
-        return switch (self.caps.color) {
-            .none => "",
-            .basic => basicBg(r, g, b),
-            .twenty_five_six => twentyFiveSixBg(r, g, b),
-            .truecolor => truecolorBg(r, g, b),
-        };
-    }
 };
-
-// --- Color helpers (return static strings for simplicity) ---
-
-fn basicFg(r: u8, g: u8, b: u8) []const u8 {
-    if (r > 128 and g > 128 and b > 128) return "\x1B[97m";
-    if (r > 128) return "\x1B[91m";
-    if (g > 128) return "\x1B[92m";
-    if (b > 128) return "\x1B[94m";
-    return "\x1B[90m";
-}
-
-fn basicBg(r: u8, g: u8, b: u8) []const u8 {
-    if (r > 128 and g > 128 and b > 128) return "\x1B[107m";
-    if (r > 128) return "\x1B[101m";
-    if (g > 128) return "\x1B[102m";
-    if (b > 128) return "\x1B[104m";
-    return "\x1B[100m";
-}
-
-fn twentyFiveSixFg(r: u8, g: u8, b: u8) []const u8 {
-    _ = rgbTo256(r, g, b);
-    return "\x1B[38;5;0m";
-}
-
-fn twentyFiveSixBg(r: u8, g: u8, b: u8) []const u8 {
-    _ = rgbTo256(r, g, b);
-    return "\x1B[48;5;0m";
-}
-
-fn truecolorFg(r: u8, g: u8, b: u8) []const u8 {
-    _ = r;
-    _ = g;
-    _ = b;
-    return "\x1B[38;2;0;0;0m";
-}
-
-fn truecolorBg(r: u8, g: u8, b: u8) []const u8 {
-    _ = r;
-    _ = g;
-    _ = b;
-    return "\x1B[48;2;0;0;0m";
-}
 
 /// Convert RGB to a 256-color palette index.
 /// Uses the 6x6x6 cube (16-231) for most colors, and the grayscale ramp
@@ -363,23 +299,4 @@ test "Profile: useSyncUpdate follows caps" {
     try std.testing.expect(!p2.useSyncUpdate());
     try std.testing.expect(!p2.useSgrMouse());
     try std.testing.expect(!p2.useBracketedPaste());
-}
-
-test "Profile: color level selects sequence" {
-    const no_color = Capabilities{
-        .term = "dumb",
-        .term_program = null,
-        .color = .none,
-        .unicode = false,
-        .sync_update = false,
-        .alt_screen = false,
-        .sgr_mouse = false,
-        .bracketed_paste = false,
-        .truecolor = false,
-        .bce = false,
-        .no_color = true,
-    };
-    const p = Profile.init(no_color);
-    try std.testing.expectEqualStrings("", p.fgColor(255, 0, 0));
-    try std.testing.expectEqualStrings("", p.bgColor(0, 255, 0));
 }

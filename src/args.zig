@@ -459,12 +459,13 @@ test "parseArgs: auto-exit=0 -> error" {
     }
 }
 
-// These tests use the page allocator: `parseInputFile` relies on
-// `std.json.parseFromSliceLeaky`, which intentionally leaks the JSON strings
-// (they live as long as the input), and the parsed commands own their titles
-// and argv. Full ownership is exercised by the runner in a later phase.
+// These tests use an ArenaAllocator wrapping `std.testing.allocator`:
+// `parseInputFile` relies on `std.json.parseFromSliceLeaky`, and the parsed
+// commands own their titles and argv within the arena.
 test "parseArgs: delimiter splits commands" {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const result = try parseArgs(allocator, &.{"%", "node", "--run", "frontend", "%", "make", "watch"});
     switch (result) {
         .parsed => |p| {
@@ -481,7 +482,9 @@ test "parseArgs: delimiter splits commands" {
 }
 
 test "parseInputFile: valid" {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const json = "[{\"command\": [\"node\", \"--run\", \"frontend\"], \"title\": \"Frontend\"}]";
     const commands = try parseInputFile(allocator, json);
     try std.testing.expectEqual(@as(usize, 1), commands.len);
@@ -490,7 +493,9 @@ test "parseInputFile: valid" {
 }
 
 test "parseInputFile: missing command" {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const result = parseInputFile(allocator, "[{\"title\": \"x\"}]");
     if (result) |_| {
         unreachable;
@@ -500,7 +505,9 @@ test "parseInputFile: missing command" {
 }
 
 test "parseInputFile: empty command" {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const result = parseInputFile(allocator, "[{\"command\": []}]");
     if (result) |_| {
         unreachable;
@@ -510,7 +517,9 @@ test "parseInputFile: empty command" {
 }
 
 test "parseInputFile: extra field" {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const result = parseInputFile(allocator, "[{\"command\": [\"x\"], \"bogus\": 1}]");
     if (result) |_| {
         unreachable;
@@ -520,7 +529,9 @@ test "parseInputFile: extra field" {
 }
 
 test "parseInputFile: not an array" {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const result = parseInputFile(allocator, "{\"command\": [\"x\"]}");
     if (result) |_| {
         unreachable;
@@ -530,7 +541,9 @@ test "parseInputFile: not an array" {
 }
 
 test "parseInputFile: command not an array" {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const result = parseInputFile(allocator, "[{\"command\": \"echo\"}]");
     if (result) |_| {
         unreachable;
@@ -540,7 +553,9 @@ test "parseInputFile: command not an array" {
 }
 
 test "parseInputFile: command element not a string" {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const result = parseInputFile(allocator, "[{\"command\": [1, 2]}]");
     if (result) |_| {
         unreachable;
@@ -550,7 +565,9 @@ test "parseInputFile: command element not a string" {
 }
 
 test "parseInputFile: title not a string" {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const result = parseInputFile(allocator, "[{\"command\": [\"x\"], \"title\": 42}]");
     if (result) |_| {
         unreachable;
@@ -560,7 +577,9 @@ test "parseInputFile: title not a string" {
 }
 
 test "parseInputFile: cwd not a string" {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const result = parseInputFile(allocator, "[{\"command\": [\"x\"], \"cwd\": 42}]");
     if (result) |_| {
         unreachable;
@@ -570,7 +589,9 @@ test "parseInputFile: cwd not a string" {
 }
 
 test "parseInputFile: status value not an array" {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const result = parseInputFile(allocator, "[{\"command\": [\"x\"], \"status\": {\"Building\": \"🔨\"}}]");
     if (result) |_| {
         unreachable;
@@ -580,7 +601,9 @@ test "parseInputFile: status value not an array" {
 }
 
 test "parseInputFile: status tuple wrong length" {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const result = parseInputFile(allocator, "[{\"command\": [\"x\"], \"status\": {\"Building\": [\"🔨\"]}}]");
     if (result) |_| {
         unreachable;
@@ -590,7 +613,9 @@ test "parseInputFile: status tuple wrong length" {
 }
 
 test "parseArgs: single non-file arg returns error" {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const result = parseArgs(allocator, &.{"%"});
     // A single arg that's not a valid file returns an error message.
     if (result) |r| {
@@ -604,13 +629,17 @@ test "parseArgs: single non-file arg returns error" {
 }
 
 test "parseArgs: repeated delimiters with no commands" {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const result = try parseArgs(allocator, &.{"%", "%", "%"});
     try std.testing.expect(result == .no_commands);
 }
 
 test "parseArgs: --auto-exit=auto" {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const result = try parseArgs(allocator, &.{"--auto-exit=auto", "%", "echo", "hi"});
     switch (result) {
         .parsed => |p| {
@@ -622,7 +651,9 @@ test "parseArgs: --auto-exit=auto" {
 }
 
 test "parseArgs: --auto-exit=234" {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const result = try parseArgs(allocator, &.{"--auto-exit=234", "%", "echo", "hi"});
     switch (result) {
         .parsed => |p| {
@@ -634,7 +665,9 @@ test "parseArgs: --auto-exit=234" {
 }
 
 test "parseArgs: --auto-exit=nope is an error" {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const result = try parseArgs(allocator, &.{"--auto-exit=nope", "%", "echo", "hi"});
     switch (result) {
         .error_message => |msg| {
@@ -645,7 +678,9 @@ test "parseArgs: --auto-exit=nope is an error" {
 }
 
 test "parseArgs: --auto-exit after delimiter is a command arg" {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const result = try parseArgs(allocator, &.{"%", "echo", "--auto-exit=2"});
     switch (result) {
         .parsed => |p| {
@@ -692,7 +727,9 @@ fn makeRng(seed: u64) std.Random {
 }
 
 test "fuzz: random bytes never crash the parser" {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const rng = makeRng(0xdeadbeef);
     for (0..50) |i| {
         _ = i;
@@ -703,7 +740,9 @@ test "fuzz: random bytes never crash the parser" {
 }
 
 test "fuzz: truncated valid JSON never crashes" {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const valid = "[{\"command\": [\"sh\", \"-c\", \"echo hello\"], \"title\": \"test\", \"cwd\": \"/tmp\", \"status\": {\"Building\": [\"🔨\", \"B\"]}}]";
     for (0..valid.len) |len| {
         const truncated = valid[0..len];
@@ -717,7 +756,9 @@ test "fuzz: truncated valid JSON never crashes" {
 // std library bug, not a bug in our code.
 
 test "fuzz: oversized strings never crash" {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     var long_str: std.array_list.Managed(u8) = .init(allocator);
     defer long_str.deinit();
     try long_str.append('"');
@@ -733,7 +774,9 @@ test "fuzz: oversized strings never crash" {
 }
 
 test "fuzz: invalid unicode escapes never crash" {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const inputs = [_][]const u8{
         "[{\"command\": [\"\\u\"}]",
         "[{\"command\": [\"\\u12\"}]",
@@ -752,7 +795,9 @@ test "fuzz: invalid unicode escapes never crash" {
 }
 
 test "fuzz: deeply nested structures never crash" {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     var buf: std.array_list.Managed(u8) = .init(allocator);
     defer buf.deinit();
     const depth = 100;
@@ -767,7 +812,9 @@ test "fuzz: deeply nested structures never crash" {
 }
 
 test "fuzz: null bytes and control characters in strings" {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     var buf: std.array_list.Managed(u8) = .init(allocator);
     defer buf.deinit();
     try buf.appendSlice("[{\"command\": [\"");
@@ -779,7 +826,9 @@ test "fuzz: null bytes and control characters in strings" {
 }
 
 test "fuzz: mismatched brackets and quotes" {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const inputs = [_][]const u8{
         "[{\"command\": [\"sh\"}",
         "[{\"command\": [\"sh",
@@ -801,7 +850,9 @@ test "fuzz: mismatched brackets and quotes" {
 }
 
 test "fuzz: empty and whitespace-only inputs" {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const inputs = [_][]const u8{
         "",
         " ",

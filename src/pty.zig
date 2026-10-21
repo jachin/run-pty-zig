@@ -119,9 +119,9 @@ pub const Pty = struct {
 
     /// Read all remaining output from the PTY master (drain the kernel buffer).
     /// Returns the collected data as an owned slice.
-    pub fn drain(self: *const Pty) []u8 {
-        var out: std.array_list.Managed(u8) = .init(std.heap.page_allocator);
-        defer out.deinit();
+    pub fn drain(self: *const Pty, allocator: std.mem.Allocator) ![]u8 {
+        var out: std.array_list.Managed(u8) = .init(allocator);
+        errdefer out.deinit();
         var buf: [4096]u8 = undefined;
         var pfd = [1]std.posix.pollfd{.{ .fd = self.master, .events = 1, .revents = 0 }};
         while (true) {
@@ -129,9 +129,9 @@ pub const Pty = struct {
             if (ready == 0 or (pfd[0].revents & 1) == 0) break;
             const n = self.read(&buf) catch break;
             if (n == 0) break;
-            out.appendSlice(buf[0..n]) catch break;
+            try out.appendSlice(buf[0..n]);
         }
-        return out.toOwnedSlice() catch &.{};
+        return out.toOwnedSlice();
     }
 
     /// Close the master fd.

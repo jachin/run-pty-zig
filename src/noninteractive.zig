@@ -29,10 +29,14 @@ pub fn run(allocator: Allocator, descriptions: []const types.CommandDescription,
     };
 
     var commands = std.array_list.Managed(Command).init(allocator);
-    defer commands.deinit();
+    defer {
+        for (commands.items) |*cmd| cmd.deinit();
+        commands.deinit();
+    }
 
     for (descriptions, 0..) |desc, i| {
         const cmd = Command{
+            .allocator = allocator,
             .label = if (i < labels.ALL_LABELS.len) labels.ALL_LABELS[i .. i + 1] else null,
             .file = desc.command[0],
             .args = desc.command[1..],
@@ -46,12 +50,12 @@ pub fn run(allocator: Allocator, descriptions: []const types.CommandDescription,
             .status = .waiting,
             .status_from_rules = null,
             .status_rules = desc.status,
-            .default_status = toStatusValue(desc.default_status),
+            .default_status = desc.default_status,
             .history = "",
             .history_alternate_screen = "",
             .pty = null,
         };
-        commands.append(cmd) catch @panic("oom");
+        try commands.append(cmd);
     }
 
     // Start the first batch (up to the concurrency limit); the rest wait.
@@ -59,7 +63,7 @@ pub fn run(allocator: Allocator, descriptions: []const types.CommandDescription,
     for (0..commands.items.len) |i| {
         const start_now = i < first_batch;
         if (start_now) {
-            commands.items[i].start(80, 24) catch @panic("spawn failed");
+            try commands.items[i].start(80, 24);
         }
         const indicator = pick(if (start_now) indicators.running else indicators.waiting, env);
         const title = try render.commandTitleOnlyWithIndicator(allocator, indicator, &commands.items[i].text(), env);
@@ -79,8 +83,8 @@ pub fn run(allocator: Allocator, descriptions: []const types.CommandDescription,
         defer cmd_of_pollfd.deinit();
         for (commands.items, 0..) |*cmd, i| {
             if (cmd.pty) |*p| {
-                pollfds.append(.{ .fd = p.master, .events = POLLIN, .revents = 0 }) catch @panic("oom");
-                cmd_of_pollfd.append(i) catch @panic("oom");
+                try pollfds.append(.{ .fd = p.master, .events = POLLIN, .revents = 0 });
+                try cmd_of_pollfd.append(i);
             }
         }
 
@@ -100,7 +104,8 @@ pub fn run(allocator: Allocator, descriptions: []const types.CommandDescription,
                     const data = buf[0..n];
                     // Respond to terminal queries with fake responses.
                     if (scanners.isTerminalQuery(data)) {
-                        const response = scanners.respondToRequestFake(allocator, data) catch "";
+                        const response = try scanners.respondToRequestFake(allocator, data);
+                        defer allocator.free(response);
                         if (response.len > 0) {
                             cmd.pty.?.write(response);
                         }
@@ -112,7 +117,7 @@ pub fn run(allocator: Allocator, descriptions: []const types.CommandDescription,
             }
             if (cmd.pty.?.tryWait()) |exit_code| {
                 any_exited = true;
-                handleExit(allocator, &commands, cmd, @intCast(exit_code), env, writer) catch @panic("write failed");
+                try handleExit(allocator, &commands, cmd, @intCast(exit_code), env, writer);
             }
         }
 
@@ -126,7 +131,7 @@ pub fn run(allocator: Allocator, descriptions: []const types.CommandDescription,
                         .waiting => true,
                         else => false,
                     }) {
-                        cmd.start(80, 24) catch @panic("spawn failed");
+                        try cmd.start(80, 24);
                         const title = try render.commandTitleOnlyWithIndicator(allocator, pick(indicators.running, env), &cmd.text(), env);
                         defer allocator.free(title);
                         try writer.writeAll(title);
@@ -152,7 +157,8 @@ pub fn run(allocator: Allocator, descriptions: []const types.CommandDescription,
 fn handleExit(allocator: Allocator, commands: *std.array_list.Managed(Command), cmd: *Command, exit_code: u32, env: Env, writer: *std.Io.Writer) !void {
     // Drain remaining PTY output before closing.
     if (cmd.pty) |*pty| {
-        const remaining = pty.drain();
+        const remaining = try pty.drain(allocator);
+        defer allocator.free(remaining);
         if (remaining.len > 0) {
             _ = cmd.pushHistory(remaining);
             try writer.writeAll(remaining);
@@ -205,10 +211,6 @@ fn allExited(commands: *std.array_list.Managed(Command)) bool {
     return true;
 }
 
-fn toStatusValue(status: ?types.StatusTuple) ?indicators.StatusValue {
-    return if (status) |s| .{ s.primary, s.degraded } else null;
-}
-
 fn pick(ind: indicators.Indicator, env: Env) []const u8 {
     return indicators.pick(ind, env);
 }
@@ -221,9 +223,9 @@ test "exit-code helpers" {
     const ok = Command.forTest(command_mod.exitStatus(0, false), null);
     const failed = Command.forTest(command_mod.exitStatus(1, false), null);
     const running = Command.forTest(command_mod.runningStatus(1), null);
-    commands.append(ok) catch @panic("oom");
-    commands.append(failed) catch @panic("oom");
-    commands.append(running) catch @panic("oom");
+    try commands.append(ok);
+    try commands.append(failed);
+    try commands.append(running);
 
     try std.testing.expectEqual(@as(usize, 1), countRunning(&commands));
     try std.testing.expectEqual(@as(usize, 2), countExited(&commands));

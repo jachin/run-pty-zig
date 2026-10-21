@@ -6,6 +6,7 @@ const Allocator = std.mem.Allocator;
 /// `\d`, `\w`, `\s`, `\D`, `\W`, `\S`, `^`, `$`, and `\\` escapes.
 /// Matching is done via recursive backtracking.
 pub const Regex = struct {
+    allocator: Allocator,
     nodes: []Node,
 
     pub const Error = error{
@@ -15,18 +16,20 @@ pub const Regex = struct {
         OutOfMemory,
     };
 
-    pub fn compile(pattern: []const u8) Error!Regex {
-        const allocator = std.heap.page_allocator;
+    pub fn compile(allocator: Allocator, pattern: []const u8) Error!Regex {
         var parser = Parser{ .allocator = allocator, .src = pattern, .pos = 0 };
         var nodes = std.array_list.Managed(Node).init(allocator);
-        errdefer nodes.deinit();
+        errdefer {
+            for (nodes.items) |*n| n.free(allocator);
+            nodes.deinit();
+        }
         try parser.parseAlternation(&nodes);
-        return .{ .nodes = try nodes.toOwnedSlice() };
+        return .{ .allocator = allocator, .nodes = try nodes.toOwnedSlice() };
     }
 
     pub fn deinit(self: *Regex) void {
-        for (self.nodes) |*n| n.free();
-        std.heap.page_allocator.free(self.nodes);
+        for (self.nodes) |*n| n.free(self.allocator);
+        self.allocator.free(self.nodes);
     }
 
     /// Search mode: the pattern can match anywhere in the string (like JS
@@ -71,17 +74,17 @@ const Node = struct {
         return if (self.class_negated) !in_set else in_set;
     }
 
-    fn free(self: *Node) void {
+    fn free(self: *Node, allocator: Allocator) void {
         if (self.children.len > 0) {
-            for (self.children) |*c| c.free();
-            std.heap.page_allocator.free(self.children);
+            for (self.children) |*c| c.free(allocator);
+            allocator.free(self.children);
         }
         if (self.branches.len > 0) {
             for (self.branches) |branch| {
-                for (branch) |*c| c.free();
-                std.heap.page_allocator.free(branch);
+                for (branch) |*c| c.free(allocator);
+                allocator.free(branch);
             }
-            std.heap.page_allocator.free(self.branches);
+            allocator.free(self.branches);
         }
     }
 };
@@ -187,30 +190,35 @@ const Parser = struct {
 
     fn parseAlternation(self: *Parser, out: *std.array_list.Managed(Node)) Regex.Error!void {
         var branches: std.array_list.Managed([]Node) = .init(self.allocator);
-        errdefer branches.deinit();
+        errdefer {
+            for (branches.items) |b| {
+                for (b) |*n| n.free(self.allocator);
+                self.allocator.free(b);
+            }
+            branches.deinit();
+        }
 
         var branch: std.array_list.Managed(Node) = .init(self.allocator);
-        errdefer branch.deinit();
+        errdefer {
+            for (branch.items) |*n| n.free(self.allocator);
+            branch.deinit();
+        }
         try self.parseSequence(&branch);
 
         while (self.pos < self.src.len and self.src[self.pos] == '|') {
             self.pos += 1;
             try branches.append(try branch.toOwnedSlice());
             branch = std.array_list.Managed(Node).init(self.allocator);
-            errdefer branch.deinit();
             try self.parseSequence(&branch);
         }
-        const last_branch = try branch.toOwnedSlice();
 
         if (branches.items.len == 0) {
-            for (last_branch) |n| try out.append(n);
-            self.allocator.free(last_branch);
+            branches.deinit();
+            defer branch.deinit();
+            try out.appendSlice(branch.items);
         } else {
-            var all_branches = std.array_list.Managed([]Node).init(self.allocator);
-            errdefer all_branches.deinit();
-            for (branches.items) |b| try all_branches.append(b);
-            try all_branches.append(last_branch);
-            const alt_node = Node{ .kind = .alt, .branches = try all_branches.toOwnedSlice() };
+            try branches.append(try branch.toOwnedSlice());
+            const alt_node = Node{ .kind = .alt, .branches = try branches.toOwnedSlice() };
             try out.append(alt_node);
         }
     }
@@ -225,7 +233,10 @@ const Parser = struct {
 
     fn parseQuantifiedTerm(self: *Parser, out: *std.array_list.Managed(Node)) Regex.Error!void {
         var atom: std.array_list.Managed(Node) = .init(self.allocator);
-        errdefer atom.deinit();
+        errdefer {
+            for (atom.items) |*n| n.free(self.allocator);
+            atom.deinit();
+        }
         try self.parseAtom(&atom);
 
         if (self.pos < self.src.len) {
@@ -254,7 +265,8 @@ const Parser = struct {
             }
         }
 
-        for (atom.items) |n| try out.append(n);
+        defer atom.deinit();
+        try out.appendSlice(atom.items);
     }
 
     fn parseAtom(self: *Parser, out: *std.array_list.Managed(Node)) Regex.Error!void {
@@ -269,7 +281,10 @@ const Parser = struct {
                 }
             }
             var group: std.array_list.Managed(Node) = .init(self.allocator);
-            errdefer group.deinit();
+            errdefer {
+                for (group.items) |*n| n.free(self.allocator);
+                group.deinit();
+            }
             try self.parseAlternation(&group);
             if (self.pos >= self.src.len or self.src[self.pos] != ')')
                 return Regex.Error.UnbalancedGroup;
@@ -323,27 +338,27 @@ const Parser = struct {
             switch (esc) {
                 'd' => {
                     var lo: u128 = 0;
-                    for ('0'..'9') |b| lo |= @as(u128, 1) << @intCast(b);
+                    for ('0'..'9' + 1) |b| lo |= @as(u128, 1) << @intCast(b);
                     try out.append(Node{ .kind = .char_class, .class_lo = lo });
                 },
                 'D' => {
                     var lo: u128 = 0;
-                    for ('0'..'9') |b| lo |= @as(u128, 1) << @intCast(b);
+                    for ('0'..'9' + 1) |b| lo |= @as(u128, 1) << @intCast(b);
                     try out.append(Node{ .kind = .char_class, .class_lo = lo, .class_negated = true });
                 },
                 'w' => {
                     var lo: u128 = 0;
-                    for ('0'..'9') |b| lo |= @as(u128, 1) << @intCast(b);
-                    for ('a'..'z') |b| lo |= @as(u128, 1) << @intCast(b);
-                    for ('A'..'Z') |b| lo |= @as(u128, 1) << @intCast(b);
+                    for ('0'..'9' + 1) |b| lo |= @as(u128, 1) << @intCast(b);
+                    for ('a'..'z' + 1) |b| lo |= @as(u128, 1) << @intCast(b);
+                    for ('A'..'Z' + 1) |b| lo |= @as(u128, 1) << @intCast(b);
                     lo |= @as(u128, 1) << '_';
                     try out.append(Node{ .kind = .char_class, .class_lo = lo });
                 },
                 'W' => {
                     var lo: u128 = 0;
-                    for ('0'..'9') |b| lo |= @as(u128, 1) << @intCast(b);
-                    for ('a'..'z') |b| lo |= @as(u128, 1) << @intCast(b);
-                    for ('A'..'Z') |b| lo |= @as(u128, 1) << @intCast(b);
+                    for ('0'..'9' + 1) |b| lo |= @as(u128, 1) << @intCast(b);
+                    for ('a'..'z' + 1) |b| lo |= @as(u128, 1) << @intCast(b);
+                    for ('A'..'Z' + 1) |b| lo |= @as(u128, 1) << @intCast(b);
                     lo |= @as(u128, 1) << '_';
                     try out.append(Node{ .kind = .char_class, .class_lo = lo, .class_negated = true });
                 },
@@ -409,7 +424,7 @@ const Parser = struct {
 };
 
 test "literal match" {
-    var re = try Regex.compile("hello");
+    var re = try Regex.compile(std.testing.allocator, "hello");
     defer re.deinit();
     try std.testing.expect(re.matches("say hello world"));
     try std.testing.expect(re.matches("hello"));
@@ -417,7 +432,7 @@ test "literal match" {
 }
 
 test "dot matches any" {
-    var re = try Regex.compile("h.llo");
+    var re = try Regex.compile(std.testing.allocator, "h.llo");
     defer re.deinit();
     try std.testing.expect(re.matches("hello"));
     try std.testing.expect(re.matches("hxllo"));
@@ -425,7 +440,7 @@ test "dot matches any" {
 }
 
 test "alternation" {
-    var re = try Regex.compile("error|warning");
+    var re = try Regex.compile(std.testing.allocator, "error|warning");
     defer re.deinit();
     try std.testing.expect(re.matches("an error occurred"));
     try std.testing.expect(re.matches("a warning was issued"));
@@ -433,7 +448,7 @@ test "alternation" {
 }
 
 test "quantifier star" {
-    var re = try Regex.compile("ab*c");
+    var re = try Regex.compile(std.testing.allocator, "ab*c");
     defer re.deinit();
     try std.testing.expect(re.matches("ac"));
     try std.testing.expect(re.matches("abc"));
@@ -443,7 +458,7 @@ test "quantifier star" {
 }
 
 test "quantifier plus" {
-    var re = try Regex.compile("a+b");
+    var re = try Regex.compile(std.testing.allocator, "a+b");
     defer re.deinit();
     try std.testing.expect(re.matches("ab"));
     try std.testing.expect(re.matches("aab"));
@@ -452,7 +467,7 @@ test "quantifier plus" {
 }
 
 test "quantifier question" {
-    var re = try Regex.compile("colou?r");
+    var re = try Regex.compile(std.testing.allocator, "colou?r");
     defer re.deinit();
     try std.testing.expect(re.matches("color"));
     try std.testing.expect(re.matches("colour"));
@@ -460,37 +475,53 @@ test "quantifier question" {
 }
 
 test "character class" {
-    var re = try Regex.compile("[a-z]+");
+    var re = try Regex.compile(std.testing.allocator, "[a-z]+");
     defer re.deinit();
     try std.testing.expect(re.matches("hello"));
     try std.testing.expect(!re.matches("12345"));
 }
 
 test "shorthand d" {
-    var re = try Regex.compile("\\d+");
+    var re = try Regex.compile(std.testing.allocator, "\\d+");
     defer re.deinit();
     try std.testing.expect(re.matches("12345"));
     try std.testing.expect(re.matches("abc123"));
+    try std.testing.expect(re.matches("9"));
     try std.testing.expect(!re.matches("abc"));
+
+    var not_d = try Regex.compile(std.testing.allocator, "^\\D+$");
+    defer not_d.deinit();
+    try std.testing.expect(not_d.matches("abc"));
+    try std.testing.expect(!not_d.matches("9"));
 }
 
 test "shorthand w" {
-    var re = try Regex.compile("\\w+");
+    var re = try Regex.compile(std.testing.allocator, "\\w+");
     defer re.deinit();
     try std.testing.expect(re.matches("hello_world"));
     try std.testing.expect(re.matches("hello world"));
+    try std.testing.expect(re.matches("9"));
+    try std.testing.expect(re.matches("z"));
+    try std.testing.expect(re.matches("Z"));
     try std.testing.expect(!re.matches("   "));
+
+    var not_w = try Regex.compile(std.testing.allocator, "^\\W+$");
+    defer not_w.deinit();
+    try std.testing.expect(not_w.matches(" -!"));
+    try std.testing.expect(!not_w.matches("9"));
+    try std.testing.expect(!not_w.matches("z"));
+    try std.testing.expect(!not_w.matches("Z"));
 }
 
 test "shorthand s" {
-    var re = try Regex.compile("\\s+");
+    var re = try Regex.compile(std.testing.allocator, "\\s+");
     defer re.deinit();
     try std.testing.expect(re.matches("hello world"));
     try std.testing.expect(!re.matches("helloworld"));
 }
 
 test "group with alternation" {
-    var re = try Regex.compile("Build (succeeded|failed)");
+    var re = try Regex.compile(std.testing.allocator, "Build (succeeded|failed)");
     defer re.deinit();
     try std.testing.expect(re.matches("Build succeeded in 3s"));
     try std.testing.expect(re.matches("Build failed"));
@@ -498,28 +529,28 @@ test "group with alternation" {
 }
 
 test "anchor start" {
-    var re = try Regex.compile("^ERROR");
+    var re = try Regex.compile(std.testing.allocator, "^ERROR");
     defer re.deinit();
     try std.testing.expect(re.matches("ERROR: something"));
     try std.testing.expect(!re.matches("  ERROR: something"));
 }
 
 test "anchor end" {
-    var re = try Regex.compile("done\\.$");
+    var re = try Regex.compile(std.testing.allocator, "done\\.$");
     defer re.deinit();
     try std.testing.expect(re.matches("all done."));
     try std.testing.expect(!re.matches("all done!"));
 }
 
 test "escaped literal" {
-    var re = try Regex.compile("a\\.b");
+    var re = try Regex.compile(std.testing.allocator, "a\\.b");
     defer re.deinit();
     try std.testing.expect(re.matches("a.b"));
     try std.testing.expect(!re.matches("axb"));
 }
 
 test "complex pattern" {
-    var re = try Regex.compile("(error|warning|fatal).*\\d+");
+    var re = try Regex.compile(std.testing.allocator, "(error|warning|fatal).*\\d+");
     defer re.deinit();
     try std.testing.expect(re.matches("error: 3 tests failed"));
     try std.testing.expect(re.matches("warning 12"));
@@ -527,14 +558,14 @@ test "complex pattern" {
 }
 
 test "negated class" {
-    var re = try Regex.compile("[^0-9]+");
+    var re = try Regex.compile(std.testing.allocator, "[^0-9]+");
     defer re.deinit();
     try std.testing.expect(re.matches("hello"));
     try std.testing.expect(!re.matches("12345"));
 }
 
 test "regex pattern that was previously matched literally" {
-    var re = try Regex.compile("error.*|fatal.*");
+    var re = try Regex.compile(std.testing.allocator, "error.*|fatal.*");
     defer re.deinit();
     try std.testing.expect(re.matches("error: something went wrong"));
     try std.testing.expect(re.matches("fatal crash"));

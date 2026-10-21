@@ -10,6 +10,9 @@ const indicators = @import("indicators.zig");
 const command = @import("command.zig");
 const render = @import("render.zig");
 const pty = @import("pty.zig");
+const scanners = @import("scanners.zig");
+const regex = @import("regex.zig");
+const terminal = @import("terminal.zig");
 const noninteractive = @import("noninteractive.zig");
 const interactive = @import("interactive.zig");
 
@@ -55,11 +58,9 @@ pub const runInteractively = interactive.run;
 
 /// Detect the rendering environment from environment variables.
 fn detectEnv() Env {
-    const nc = std.c.getenv("NO_COLOR");
-    if (nc) |ptr| {
-        if (ptr[0] != 0) return Env{ .no_color = true, .supports_emoji = false };
-    }
-    return Env{ .no_color = false, .supports_emoji = true };
+    const caps = terminal.Capabilities.detect();
+    if (caps.no_color) return Env{ .no_color = true, .supports_emoji = false };
+    return Env{ .no_color = false, .supports_emoji = caps.unicode };
 }
 
 pub const version = "0.1.2";
@@ -67,8 +68,7 @@ pub const version = "0.1.2";
 /// Entry point for the tool. `args` is the full argv; `args[0]` is the program
 /// name. `stdin_is_tty` decides between interactive (Phase 6) and
 /// non-interactive (CI) modes.
-pub fn run(writer: *Io.Writer, args: []const [:0]const u8, stdin_is_tty: bool) !void {
-    const allocator = std.heap.page_allocator;
+pub fn run(allocator: std.mem.Allocator, writer: *Io.Writer, args: []const [:0]const u8, stdin_is_tty: bool) !void {
     const rest = if (args.len > 0) args[1..] else args;
 
     // Handle --version / -V before parsing.
@@ -80,12 +80,10 @@ pub fn run(writer: *Io.Writer, args: []const [:0]const u8, stdin_is_tty: bool) !
         }
     }
 
-    const parse_result = try parseArgs(allocator, rest);
-    defer switch (parse_result) {
-        .parsed => |p| allocator.free(p.commands),
-        .error_message => |msg| allocator.free(msg),
-        else => {},
-    };
+    var parse_arena = std.heap.ArenaAllocator.init(allocator);
+    defer parse_arena.deinit();
+
+    const parse_result = try parseArgs(parse_arena.allocator(), rest);
 
     switch (parse_result) {
         .help => {
@@ -133,6 +131,7 @@ test "detectEnv: NO_COLOR set" {
 }
 
 test "detectEnv: NO_COLOR empty string" {
+    _ = setenv("TERM", "xterm-256color", 1);
     _ = setenv("NO_COLOR", "", 1);
     defer _ = unsetenv("NO_COLOR");
     const env = detectEnv();
@@ -141,8 +140,35 @@ test "detectEnv: NO_COLOR empty string" {
 }
 
 test "detectEnv: NO_COLOR unset" {
+    _ = setenv("TERM", "xterm-256color", 1);
     _ = unsetenv("NO_COLOR");
     const env = detectEnv();
     try std.testing.expect(!env.no_color);
     try std.testing.expect(env.supports_emoji);
+}
+
+test "detectEnv: TERM=dumb disables emoji" {
+    _ = setenv("TERM", "dumb", 1);
+    defer _ = setenv("TERM", "xterm-256color", 1);
+    _ = unsetenv("NO_COLOR");
+    const env = detectEnv();
+    try std.testing.expect(!env.no_color);
+    try std.testing.expect(!env.supports_emoji);
+}
+
+test {
+    std.testing.refAllDecls(@This());
+    _ = types;
+    _ = labels;
+    _ = args_mod;
+    _ = ansi;
+    _ = indicators;
+    _ = command;
+    _ = render;
+    _ = pty;
+    _ = scanners;
+    _ = regex;
+    _ = terminal;
+    _ = noninteractive;
+    _ = interactive;
 }

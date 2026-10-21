@@ -62,7 +62,7 @@ var saved_termios: ?std.c.termios = null;
 /// signal restores the terminal and exits immediately (safety net).
 var signal_count = std.atomic.Value(u32).init(0);
 
-extern "c" fn signal(sig: c_int, handler: ?*fn(c_int) callconv(.c) void) c_int;
+extern "c" fn signal(sig: c_int, handler: ?*const fn (c_int) callconv(.c) void) c_int;
 extern "c" fn _exit(status: c_int) noreturn;
 
 fn signalHandler(sig: c_int) callconv(.c) void {
@@ -126,10 +126,17 @@ pub const Session = struct {
     }
 
     pub fn deinit(self: *Session) void {
+        switch (self.current) {
+            .dashboard => |d| {
+                for (d.previous_render) |old_line| self.allocator.free(old_line);
+                if (d.previous_render.len > 0) self.allocator.free(d.previous_render);
+            },
+            else => {},
+        }
         self.poll_fds.deinit();
         self.cmd_of_pollfd.deinit();
         for (self.commands) |*c| {
-            if (c.pty) |*pty| pty.deinit();
+            c.deinit();
         }
     }
 
@@ -251,7 +258,9 @@ pub const Session = struct {
         };
         const header = try render.historyStart(self.allocator, header_indicator, &command.text(), std.mem.eql(u8, command.cwd, "."), self.env);
         defer self.allocator.free(header);
-        const full_history = try std.mem.concat(self.allocator, u8, &.{ header, command.joinHistory() });
+        const joined_history = try command.joinHistory(self.allocator);
+        defer self.allocator.free(joined_history);
+        const full_history = try std.mem.concat(self.allocator, u8, &.{ header, joined_history });
         defer self.allocator.free(full_history);
         try self.printDataWithExtraText(command, full_history, false);
     }
@@ -872,8 +881,8 @@ pub const Session = struct {
 
         const exit_code = command.pty.?.tryWait() orelse return;
         // Drain remaining PTY output before closing.
-        const remaining = command.pty.?.drain();
-        defer if (remaining.len > 0) std.heap.page_allocator.free(remaining);
+        const remaining = command.pty.?.drain(self.allocator) catch &.{};
+        defer if (remaining.len > 0) self.allocator.free(remaining);
         if (remaining.len > 0) {
             _ = command.pushHistory(remaining);
             // Only write to the terminal if we're viewing this command.
@@ -964,12 +973,10 @@ pub const Session = struct {
         signal_received.store(false, .monotonic);
         resize_received.store(false, .monotonic);
         signal_count.store(0, .monotonic);
-        const handler: *fn(c_int) callconv(.c) void = @constCast(&signalHandler);
-        _ = signal(@intFromEnum(std.posix.SIG.INT), handler);
-        _ = signal(@intFromEnum(std.posix.SIG.TERM), handler);
-        _ = signal(@intFromEnum(std.posix.SIG.HUP), handler);
-        const resize_handler: *fn(c_int) callconv(.c) void = @constCast(&resizeHandler);
-        _ = signal(@intFromEnum(std.posix.SIG.WINCH), resize_handler);
+        _ = signal(@intFromEnum(std.posix.SIG.INT), &signalHandler);
+        _ = signal(@intFromEnum(std.posix.SIG.TERM), &signalHandler);
+        _ = signal(@intFromEnum(std.posix.SIG.HUP), &signalHandler);
+        _ = signal(@intFromEnum(std.posix.SIG.WINCH), &resizeHandler);
     }
 
     fn restoreTerminal(self: *Session) void {
@@ -995,21 +1002,32 @@ pub const Session = struct {
 /// Entry point for interactive mode.
 pub fn run(allocator: Allocator, descriptions: []const types.CommandDescription, auto_exit: AutoExit, env: Env, writer: *std.Io.Writer) !u32 {
     var commands: std.array_list.Managed(Command) = .init(allocator);
-    defer commands.deinit();
+    defer {
+        for (commands.items) |*c| {
+            if (c.formatted_command_with_title.len > 0) {
+                allocator.free(c.formatted_command_with_title);
+            }
+            c.deinit();
+        }
+        commands.deinit();
+    }
 
     for (descriptions, 0..) |desc, i| {
         const label = if (i < labels.ALL_LABELS.len) labels.ALL_LABELS[i .. i + 1] else null;
         const formatted_cmd = try args_mod.commandToPresentationName(allocator, desc.command);
         const formatted_with_title = if (std.mem.eql(u8, desc.title, formatted_cmd))
             formatted_cmd
-        else if (env.no_color)
-            try std.fmt.allocPrint(allocator, "{s}: {s}", .{ desc.title, formatted_cmd })
-        else blk: {
+        else if (env.no_color) blk: {
+            defer allocator.free(formatted_cmd);
+            break :blk try std.fmt.allocPrint(allocator, "{s}: {s}", .{ desc.title, formatted_cmd });
+        } else blk: {
+            defer allocator.free(formatted_cmd);
             const bold_title = try render.bold(allocator, desc.title, false);
             defer allocator.free(bold_title);
             break :blk try std.fmt.allocPrint(allocator, "{s}: {s}", .{ bold_title, formatted_cmd });
         };
         var cmd = Command{
+            .allocator = allocator,
             .label = label,
             .file = desc.command[0],
             .args = desc.command[1..],
@@ -1029,8 +1047,8 @@ pub fn run(allocator: Allocator, descriptions: []const types.CommandDescription,
             .pty = null,
         };
         if (desc.default_status) |ds| {
-            cmd.default_status = .{ ds.primary, ds.degraded };
-            cmd.status_from_rules = .{ ds.primary, ds.degraded };
+            cmd.default_status = ds;
+            cmd.status_from_rules = ds;
         }
         try commands.append(cmd);
     }
@@ -1038,10 +1056,7 @@ pub fn run(allocator: Allocator, descriptions: []const types.CommandDescription,
     var session = Session.init(allocator, commands.items, auto_exit, env, writer);
     defer session.deinit();
 
-    session.run() catch |err| {
-        if (err == error.Exit) return 0;
-        return err;
-    };
+    try session.run();
     return 0;
 }
 
@@ -1112,16 +1127,7 @@ test "onStdin: mouse click in command view returns to dashboard" {
     var out_buf: [4096]u8 = undefined;
     var writer = std.Io.Writer.fixed(&out_buf);
     var session = Session.init(allocator, &cmds, .{ .auto_exit = 2 }, .{ .no_color = true, .supports_emoji = false }, &writer);
-    defer {
-        switch (session.current) {
-            .dashboard => |d| {
-                for (d.previous_render) |old_line| allocator.free(old_line);
-                if (d.previous_render.len > 0) allocator.free(d.previous_render);
-            },
-            else => {},
-        }
-        session.deinit();
-    }
+    defer session.deinit();
     session.current = .{ .command = .{ .index = 0 } };
 
     try session.onStdin("\x1B[<0;5;3M");
@@ -1186,16 +1192,7 @@ test "switchToDashboard: emits non-empty dashboard lines with vertical cursor po
     var writer = std.Io.Writer.fixed(&out_buf);
     const env = Env{ .no_color = false, .supports_emoji = true };
     var session = Session.init(allocator, &cmds, .{ .auto_exit = 2 }, env, &writer);
-    defer {
-        switch (session.current) {
-            .dashboard => |d| {
-                for (d.previous_render) |old_line| allocator.free(old_line);
-                if (d.previous_render.len > 0) allocator.free(d.previous_render);
-            },
-            else => {},
-        }
-        session.deinit();
-    }
+    defer session.deinit();
 
     try session.switchToDashboard(false);
     const written = writer.buffered();
