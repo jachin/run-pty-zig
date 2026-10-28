@@ -462,6 +462,43 @@ test "start, kill, and markExited lifecycle" {
     try std.testing.expectEqual(@as(u32, 128 + @intFromEnum(std.posix.SIG.KILL)), exit.exit_code);
 }
 
+fn readCommandOutput(command: *Command, output: []u8) ![]const u8 {
+    var len: usize = 0;
+    if (command.pty) |*pty| {
+        while (len < output.len) {
+            const n = pty.read(output[len..]) catch break;
+            if (n == 0) break;
+            len += n;
+        }
+        const exit_code = pty.wait();
+        command.markExited(@intCast(exit_code));
+        try std.testing.expectEqual(@as(c_int, 0), exit_code);
+    } else {
+        return error.CommandNotRunning;
+    }
+    return output[0..len];
+}
+
+test "start inherits the parent PATH on each restart" {
+    const path_ptr = std.c.getenv("PATH") orelse return error.PathNotSet;
+    const expected_path = std.mem.sliceTo(path_ptr, 0);
+
+    var command = Command.forTest(.waiting, null);
+    defer command.deinit();
+    command.file = "/bin/sh";
+    command.args = &.{ "-c", "printf '%s' \"$PATH\"" };
+
+    var first_output: [16384]u8 = undefined;
+    try command.start(80, 24);
+    const first_text = try readCommandOutput(&command, &first_output);
+    try std.testing.expectEqualStrings(expected_path, first_text);
+
+    var second_output: [16384]u8 = undefined;
+    try command.start(80, 24);
+    const second_text = try readCommandOutput(&command, &second_output);
+    try std.testing.expectEqualStrings(expected_path, second_text);
+}
+
 const test_rules = [_]StatusRule{
     .{ .pattern = "Building", .status = .{ .primary = "🔨", .degraded = "\x1B[94mB\x1B[m" } },
     .{ .pattern = "Done", .status = null },

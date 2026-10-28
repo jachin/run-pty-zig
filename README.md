@@ -75,6 +75,47 @@ The JSON format is a top-level array of command objects:
 | `NO_COLOR` | Use plain single-character indicators instead of emoji/ANSI color. |
 | `RUN_PTY_MAX_HISTORY` | Maximum bytes of output history to retain per command (default: 1,000,000). |
 
+### Devbox-managed commands
+
+`run-pty` starts each command as a literal argv array with `execvp`; it inherits the exported environment and `PATH` ordering of the `run-pty` process. A command's `cwd` changes its working directory before it starts, but does not activate Devbox, load shell startup files, or rebuild `PATH`.
+
+To run a config with all commands inside the project's Devbox environment, launch `run-pty` from `devbox run`:
+
+```sh
+cd /path/to/project
+devbox run -- run-pty ./run-pty.json
+```
+
+For a one-off command or non-interactive batch:
+
+```sh
+devbox run -- run-pty --auto-exit % gleam build % rebar3 version
+```
+
+If `run-pty` itself is launched outside Devbox, wrap each command that needs Devbox packages:
+
+```sh
+run-pty --auto-exit % devbox run -- gleam build
+```
+
+The equivalent JSON command is `"command": ["devbox", "run", "--", "gleam", "build"]`. Shell syntax such as variable expansion, pipes, or `&&` requires an explicit shell in the argv, for example `"command": ["devbox", "run", "--", "sh", "-c", "gleam build && gleam run"]`.
+
+To compare tool selection, run this check directly and then as a command under `run-pty` (using `devbox run -- run-pty --auto-exit % sh -c '<check>'`):
+
+```sh
+devbox run -- sh -c 'printf "PATH=%s\n" "$PATH"; command -v gleam; gleam --version; command -v erl; erl -noshell -eval "io:format(\"OTP=~s ERTS=~s compiler=~s~n\", [erlang:system_info(otp_release), erlang:system_info(version), code:lib_dir(compiler)]), halt()."; command -v erlc; command -v rebar3; rebar3 version'
+```
+
+`erlc -version` is not a supported version query on the tested Erlang release; use the `erl` runtime/compiler information and `rebar3 version` instead. When comparing results, the resolved paths matter as much as the version strings.
+
+Restarts inherit the environment held by the running `run-pty` process; they do not pick up later changes made in another terminal. Exit and relaunch `run-pty` through `devbox run` to refresh that inherited environment. A command that explicitly invokes `devbox run` performs its own Devbox setup each time it starts.
+
+#### GleamingSigns investigation
+
+The inspected `overseer-pty.json` backend command runs `devbox run -- sh -c`, then changes to `overseer/backend` and starts `watchexec`; the watcher launches `scripts/dev.sh`. Direct Devbox, run-pty-to-Devbox, and a print-only watcher probe all resolved `gleam`, `erl`, `erlc`, and `rebar3` from the project's `.devbox/nix/profile/default/bin`, with matching `PATH` ordering. The observed versions were Gleam `1.19.2`, Erlang/OTP `28` (ERTS `16.4.0.6`, compiler library `9.0.6.3`), and rebar3 `3.27.3`.
+
+This comparison did not demonstrate a run-pty environment or executable-resolution mismatch, so no run-pty workaround or GleamingSigns script change is indicated. GleamingSigns declares `gleam@latest`; if a different Gleam version is intended, pin that intended version in its `devbox.json` rather than rewriting `PATH` in run-pty. In the tested Devbox shell, `cd` changed the actual directory but `$PWD` remained at the project root; `pwd` reported `overseer/backend`, and the compiler paths remained unchanged. Avoid relying on `$PWD` after that `cd` in this particular launch chain.
+
 ### Keyboard shortcuts (interactive mode)
 
 | Key | Action |

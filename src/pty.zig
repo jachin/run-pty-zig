@@ -9,6 +9,16 @@ const c = std.c;
 
 extern "c" fn openpty(amaster: *c_int, aslave: *c_int, name: [*:0]u8, termp: ?*c.termios, winp: ?*c.winsize) c_int;
 extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+extern "c" fn mkdtemp(template: [*:0]u8) ?[*:0]u8;
+extern "c" fn mkdir(path: [*:0]const u8, mode: c_uint) c_int;
+extern "c" fn rmdir(path: [*:0]const u8) c_int;
+extern "c" fn unlink(path: [*:0]const u8) c_int;
+extern "c" fn chmod(path: [*:0]const u8, mode: c_uint) c_int;
+extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
+extern "c" fn fwrite(buffer: [*]const u8, size: usize, count: usize, stream: *anyopaque) usize;
+extern "c" fn fclose(stream: *anyopaque) c_int;
 
 // Darwin ioctl request encodings (computed from _IOW/_IOR/_IO in <sys/ioccom.h>).
 const TIOCSWINSZ: c_int = @bitCast(@as(u32, 0x80087467));
@@ -166,6 +176,155 @@ pub const Pty = struct {
         return @ptrCast(@constCast(z.ptr));
     }
 };
+
+const ScopedEnvironment = struct {
+    allocator: std.mem.Allocator,
+    name: [:0]const u8,
+    previous: ?[:0]u8,
+
+    fn set(allocator: std.mem.Allocator, name: [:0]const u8, value: [:0]const u8) !ScopedEnvironment {
+        var previous: ?[:0]u8 = null;
+        if (std.c.getenv(name.ptr)) |current| {
+            previous = try copySentinel(allocator, std.mem.sliceTo(current, 0));
+        }
+        errdefer if (previous) |current| allocator.free(current);
+
+        if (setenv(name.ptr, value.ptr, 1) != 0) return error.SetEnvironmentFailed;
+        return .{ .allocator = allocator, .name = name, .previous = previous };
+    }
+
+    fn deinit(self: ScopedEnvironment) void {
+        if (self.previous) |previous| {
+            _ = setenv(self.name.ptr, previous.ptr, 1);
+            self.allocator.free(previous);
+        } else {
+            _ = unsetenv(self.name.ptr);
+        }
+    }
+};
+
+fn copySentinel(allocator: std.mem.Allocator, value: []const u8) ![:0]u8 {
+    const copy = try allocator.allocSentinel(u8, value.len, 0);
+    @memcpy(copy, value);
+    return copy;
+}
+
+fn createTestTempDir(allocator: std.mem.Allocator) ![:0]u8 {
+    const template = "/tmp/run-pty-zig-test-XXXXXX";
+    const path = try copySentinel(allocator, template);
+    if (mkdtemp(path.ptr) == null) {
+        allocator.free(path);
+        return error.CreateTestTempDirFailed;
+    }
+    return path;
+}
+
+fn joinTestPath(allocator: std.mem.Allocator, directory: []const u8, name: []const u8) ![:0]u8 {
+    const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ directory, name });
+    defer allocator.free(path);
+    return copySentinel(allocator, path);
+}
+
+fn joinTestSearchPath(allocator: std.mem.Allocator, first: []const u8, second: []const u8) ![:0]u8 {
+    const path = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ first, second });
+    defer allocator.free(path);
+    return copySentinel(allocator, path);
+}
+
+fn writeTestExecutable(path: [:0]const u8, contents: []const u8) !void {
+    const file = fopen(path.ptr, "w") orelse return error.CreateTestExecutableFailed;
+    var close_needed = true;
+    defer if (close_needed) {
+        _ = fclose(file);
+    };
+
+    if (fwrite(contents.ptr, 1, contents.len, file) != contents.len) return error.WriteTestExecutableFailed;
+    const close_result = fclose(file);
+    close_needed = false;
+    if (close_result != 0) return error.CloseTestExecutableFailed;
+    if (chmod(path.ptr, 0o700) != 0) return error.ChmodTestExecutableFailed;
+}
+
+fn readPtyOutput(pty: *const Pty, output: []u8) ![]const u8 {
+    var len: usize = 0;
+    while (len < output.len) {
+        const n = pty.read(output[len..]) catch break;
+        if (n == 0) break;
+        len += n;
+    }
+    try std.testing.expectEqual(@as(c_int, 0), pty.wait());
+    return output[0..len];
+}
+
+test "spawn inherits an exported environment variable" {
+    const allocator = std.testing.allocator;
+    var sentinel = try ScopedEnvironment.set(allocator, "RUN_PTY_ZIG_TEST_SENTINEL", "inherited-value");
+    defer sentinel.deinit();
+
+    const pty = try Pty.spawn("/bin/sh", &.{ "-c", "printf '%s' \"$RUN_PTY_ZIG_TEST_SENTINEL\"" }, null, 80, 24);
+    defer pty.deinit();
+    var output: [128]u8 = undefined;
+    const text = try readPtyOutput(&pty, &output);
+    try std.testing.expectEqualStrings("inherited-value", text);
+}
+
+test "spawn resolves PATH order after changing child cwd" {
+    const allocator = std.testing.allocator;
+    const root = try createTestTempDir(allocator);
+    defer {
+        _ = rmdir(root.ptr);
+        allocator.free(root);
+    }
+
+    const first_dir = try joinTestPath(allocator, root, "first");
+    defer {
+        _ = rmdir(first_dir.ptr);
+        allocator.free(first_dir);
+    }
+    const second_dir = try joinTestPath(allocator, root, "second");
+    defer {
+        _ = rmdir(second_dir.ptr);
+        allocator.free(second_dir);
+    }
+    if (mkdir(first_dir.ptr, 0o700) != 0 or mkdir(second_dir.ptr, 0o700) != 0) return error.CreateTestToolDirsFailed;
+
+    const first_tool = try joinTestPath(allocator, first_dir, "same-name");
+    defer {
+        _ = unlink(first_tool.ptr);
+        allocator.free(first_tool);
+    }
+    const second_tool = try joinTestPath(allocator, second_dir, "same-name");
+    defer {
+        _ = unlink(second_tool.ptr);
+        allocator.free(second_tool);
+    }
+    try writeTestExecutable(first_tool, "#!/bin/sh\nprintf 'first:'\npwd -P\n");
+    try writeTestExecutable(second_tool, "#!/bin/sh\nprintf 'second:'\npwd -P\n");
+
+    const first_path = try joinTestSearchPath(allocator, first_dir, second_dir);
+    defer allocator.free(first_path);
+    var first_path_override = try ScopedEnvironment.set(allocator, "PATH", first_path);
+    defer first_path_override.deinit();
+
+    const first = try Pty.spawn("same-name", &.{}, second_dir, 80, 24);
+    defer first.deinit();
+    var first_output: [512]u8 = undefined;
+    const first_text = try readPtyOutput(&first, &first_output);
+    try std.testing.expect(std.mem.indexOf(u8, first_text, "first:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first_text, "/second") != null);
+
+    const second_path = try joinTestSearchPath(allocator, second_dir, first_dir);
+    defer allocator.free(second_path);
+    var second_path_override = try ScopedEnvironment.set(allocator, "PATH", second_path);
+    defer second_path_override.deinit();
+
+    const second = try Pty.spawn("same-name", &.{}, first_dir, 80, 24);
+    defer second.deinit();
+    var second_output: [512]u8 = undefined;
+    const second_text = try readPtyOutput(&second, &second_output);
+    try std.testing.expect(std.mem.indexOf(u8, second_text, "second:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, second_text, "/first") != null);
+}
 
 test "spawn echo and read its output" {
     const pty = try Pty.spawn("echo", &.{"hello", "world"}, null, 80, 24);
