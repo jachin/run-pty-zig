@@ -1,8 +1,8 @@
 class RunPty < Formula
   desc "Run several commands concurrently in PTYs with an interactive dashboard"
   homepage "https://github.com/jachin/run-pty-zig"
-  url "https://github.com/jachin/run-pty-zig/archive/refs/tags/v0.1.2.tar.gz"
-  version "0.1.2"
+  url "https://github.com/jachin/run-pty-zig/archive/refs/tags/v0.1.3.tar.gz"
+  version "0.1.3"
   license "MIT"
   depends_on "zig"
 
