@@ -12,6 +12,7 @@
 #   - src/root.zig                    (pub const version + the version test)
 #   - build.zig.zon                   (.version field)
 #   - README.md                       (**Version X.Y.Z**)
+#   - default.nix                     (version = "X.Y.Z")
 #   - homebrew/run-pty.rb             (formula url + version)
 #   - homebrew-run-pty-zig/run-pty.rb (Homebrew tap formula — separate repo)
 #
@@ -145,6 +146,10 @@ set_zon_version "build.zig.zon" "$NEW"
 ok "build.zig.zon"
 replace_in_file "README.md" "$CURRENT" "$NEW"
 ok "README.md"
+if [ -f "default.nix" ]; then
+  replace_in_file "default.nix" "version = \"${CURRENT}\"" "version = \"${NEW}\""
+  ok "default.nix"
+fi
 replace_in_file "homebrew/run-pty.rb" "$CURRENT" "$NEW"
 ok "homebrew/run-pty.rb"
 if [ -f "$TAP_DIR/run-pty.rb" ]; then
@@ -155,7 +160,7 @@ echo
 
 # --- 6. Main repo: commit -> push -> tag -> push tag ---
 if ask "Commit the version bump to git?" "y"; then
-  if git add src/root.zig build.zig.zon README.md homebrew/run-pty.rb \
+  if git add src/root.zig build.zig.zon README.md default.nix homebrew/run-pty.rb \
      && git commit -m "Bump version to ${NEW}"; then
     ok "Committed: Bump version to ${NEW}"
   else

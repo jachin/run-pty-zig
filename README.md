@@ -15,6 +15,26 @@ brew tap jachin/run-pty-zig
 brew install run-pty
 ```
 
+### Nix
+
+Install directly via Nix:
+
+```sh
+# Install from GitHub
+nix-env -f https://github.com/jachin/run-pty-zig/archive/v0.1.3.tar.gz -i
+
+# Or build locally from source
+nix-build
+```
+
+Or add it to your NixOS or Home Manager configuration:
+
+```nix
+environment.systemPackages = [
+  (pkgs.callPackage (fetchTarball "https://github.com/jachin/run-pty-zig/archive/v0.1.3.tar.gz") {})
+];
+```
+
 ### From source
 
 ```sh
