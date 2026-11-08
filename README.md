@@ -8,6 +8,30 @@ This is a port of [lydell/run-pty](https://github.com/lydell/run-pty) to [Zig](h
 
 ## Install
 
+### Devbox
+
+Add `run-pty` directly to a project's `devbox.json`:
+
+```sh
+devbox add github:jachin/run-pty-zig
+```
+
+Or declare it in `devbox.json`:
+
+```json
+{
+  "packages": [
+    "github:jachin/run-pty-zig"
+  ]
+}
+```
+
+To install globally for your user via Devbox:
+
+```sh
+devbox global add github:jachin/run-pty-zig
+```
+
 ### Homebrew (macOS)
 
 ```sh
